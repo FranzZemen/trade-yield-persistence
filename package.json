@@ -50,10 +50,10 @@
   "dependencies": {
     "@franzzemen/aws-app": "^27.3.30",
     "@franzzemen/endpoint-application": "^10.3.104",
-    "@franzzemen/endpoint-financial-identity": "^7.0.231",
+    "@franzzemen/endpoint-financial-identity": "^7.0.232",
     "@franzzemen/enhanced-error": "^8.1.188",
     "@franzzemen/execution-context": "^16.1.11",
-    "@franzzemen/financial-identity": "^63.1.2",
+    "@franzzemen/financial-identity": "^63.1.3",
     "@franzzemen/logger": "^104.0.26",
     "@franzzemen/utility": "^13.7.2"
   }
