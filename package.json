@@ -1,0 +1,60 @@
+{
+  "name": "@franzzemen/trade-yield-persistence",
+  "version": "0.0.1",
+  "description": "Persistence layer for trade-level yield segments (TradeYieldSegment, SubTradeYieldUnit, open/as-of/since trade-yield summaries). DDB schema, key encoders, and trusted I/O APIs consumed by brokenstock-orchestrator.",
+  "homepage": "https://github.com/FranzZemen/trade-yield-persistence#readme",
+  "bugs": {
+    "url": "https://github.com/FranzZemen/trade-yield-persistence/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/FranzZemen/trade-yield-persistence.git"
+  },
+  "license": "UNLICENSED",
+  "author": "Franz Zemen",
+  "type": "module",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1045.0",
+    "@aws-sdk/credential-providers": "^3.1045.0",
+    "@aws-sdk/lib-dynamodb": "^3.1045.0",
+    "@franzzemen/build-system": "^27.0.0",
+    "@franzzemen/execution-context-node-loader": "^2.0.18",
+    "@franzzemen/node-loggers": "^1.0.91",
+    "@franzzemen/npmu": "^12.5.6",
+    "@franzzemen/safe-config": "^5.1.16",
+    "@inquirer/prompts": "^8.4.3",
+    "@smithy/node-http-handler": "^4.7.1",
+    "@types/chai": "^5.2.3",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^25.7.0",
+    "chai": "^6.2.2",
+    "fastest-validator": "^1.19.1",
+    "mocha": "^11.7.5",
+    "typescript": "^6.0.3"
+  },
+  "exports": {
+    ".": {
+      "types": "./out/project/types/index.d.js",
+      "import": "./out/project/index.js"
+    }
+  },
+  "imports": {
+    "#project": {
+      "types": "./out/project/types/project-index.d.js",
+      "import": "./out/project/project-index.js"
+    }
+  },
+  "dependencies": {
+    "@franzzemen/aws-app": "^27.3.29",
+    "@franzzemen/endpoint-application": "^10.3.103",
+    "@franzzemen/endpoint-financial-identity": "^7.0.230",
+    "@franzzemen/enhanced-error": "^8.1.187",
+    "@franzzemen/execution-context": "^16.1.11",
+    "@franzzemen/financial-identity": "^63.1.1",
+    "@franzzemen/logger": "^104.0.25",
+    "@franzzemen/utility": "^13.7.2"
+  }
+}
