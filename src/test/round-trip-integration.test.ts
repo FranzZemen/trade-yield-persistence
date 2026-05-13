@@ -99,6 +99,12 @@ function makeOpenSummary(tradeUuid: TradeUUID, segments: TradeYieldSegment[], un
     annualizedYieldCagr: 0,
     segments,
     subTradeYieldUnits: units,
+    subTradeWins:       0,
+    subTradeLosses:     0,
+    subTradeBreakevens: 0,
+    subTradeWinRate:    null,
+    subTradeWinAmount:  0,
+    subTradeLossAmount: 0,
     computedAt: Date.now(),
   };
 }

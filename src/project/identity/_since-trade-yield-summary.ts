@@ -48,6 +48,14 @@ export type _SinceTradeYieldSummary = DBRecord & {
   annualizedYieldCagr: number;
   gainSince: number;
 
+  // Sub-trade W/L tally — memory `project_win_loss_tier_design`.
+  subTradeWins: number;
+  subTradeLosses: number;
+  subTradeBreakevens: number;
+  subTradeWinRate: number | null;
+  subTradeWinAmount: number;
+  subTradeLossAmount: number;
+
   segmentUuids: TradeYieldSegmentUUID[];
   subTradeYieldUnitUuids: SubTradeYieldUnitUUID[];
 
@@ -91,6 +99,12 @@ export function toSinceTradeYieldSummary(
     annualizedYieldCagr: row.annualizedYieldCagr,
     segments,
     subTradeYieldUnits,
+    subTradeWins:       row.subTradeWins,
+    subTradeLosses:     row.subTradeLosses,
+    subTradeBreakevens: row.subTradeBreakevens,
+    subTradeWinRate:    row.subTradeWinRate,
+    subTradeWinAmount:  row.subTradeWinAmount,
+    subTradeLossAmount: row.subTradeLossAmount,
     computedAt: row.computedAt,
   };
   if (row.priceSource !== undefined) summary.priceSource = row.priceSource;

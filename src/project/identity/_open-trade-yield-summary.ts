@@ -42,6 +42,16 @@ export type _OpenTradeYieldSummary = DBRecord & {
   annualizedYieldLinear: number;
   annualizedYieldCagr: number;
 
+  // Sub-trade W/L tally (memory `project_win_loss_tier_design`). Atom = closed
+  // sub-trade. Stored on the row so reads can hydrate the public summary
+  // without re-running tallySubTradeOutcomes.
+  subTradeWins: number;
+  subTradeLosses: number;
+  subTradeBreakevens: number;
+  subTradeWinRate: number | null;
+  subTradeWinAmount: number;
+  subTradeLossAmount: number;
+
   segmentUuids: TradeYieldSegmentUUID[];
   subTradeYieldUnitUuids: SubTradeYieldUnitUUID[];
 
@@ -78,6 +88,12 @@ export function toOpenTradeYieldSummary(
     annualizedYieldCagr: row.annualizedYieldCagr,
     segments,
     subTradeYieldUnits,
+    subTradeWins:       row.subTradeWins,
+    subTradeLosses:     row.subTradeLosses,
+    subTradeBreakevens: row.subTradeBreakevens,
+    subTradeWinRate:    row.subTradeWinRate,
+    subTradeWinAmount:  row.subTradeWinAmount,
+    subTradeLossAmount: row.subTradeLossAmount,
     computedAt: row.computedAt,
   };
   if (row.priceSource !== undefined) summary.priceSource = row.priceSource;
