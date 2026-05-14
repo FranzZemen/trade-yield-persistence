@@ -255,6 +255,8 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       if (summary.priceSource !== undefined) row.priceSource = summary.priceSource;
       if (summary.closingDate !== undefined) row.closingDate = summary.closingDate;
       if (summary.explanation !== undefined) row.explanation = summary.explanation;
+      if (summary.priceCoverage !== undefined) row.priceCoverage = summary.priceCoverage;
+      if (summary.recomputeAttempts !== undefined) row.recomputeAttempts = summary.recomputeAttempts;
 
       await this.#dynamo.batchPut({[OPEN_TRADE_YIELD_SUMMARIES]: [row]});
       log.info(`putOpenTradeSummary: tradeUuid=${summary.tradeUuid} segments=${segmentRows.length} units=${unitRows.length}`);

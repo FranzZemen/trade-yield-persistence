@@ -59,6 +59,9 @@ export type _OpenTradeYieldSummary = DBRecord & {
   closingDate?: Datestamp;
   computedAt: number;
   explanation?: string;
+  // E11.5 cache-quality: see TradeYieldSegmentSummary docstring.
+  priceCoverage?: number;
+  recomputeAttempts?: number;
 };
 
 /**
@@ -99,5 +102,7 @@ export function toOpenTradeYieldSummary(
   if (row.priceSource !== undefined) summary.priceSource = row.priceSource;
   if (row.closingDate !== undefined) summary.closingDate = row.closingDate;
   if (row.explanation !== undefined) summary.explanation = row.explanation;
+  if (row.priceCoverage !== undefined) summary.priceCoverage = row.priceCoverage;
+  if (row.recomputeAttempts !== undefined) summary.recomputeAttempts = row.recomputeAttempts;
   return summary;
 }
