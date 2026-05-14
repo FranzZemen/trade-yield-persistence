@@ -27,8 +27,13 @@ import {
   OPEN_TRADE_YIELD_SUMMARIES,
   SINCE_TRADE_YIELD_SUMMARIES,
   SUB_TRADE_YIELD_UNITS,
+  TRADE_DAILY_MTM_SERIES,
   TRADE_YIELD_SEGMENTS,
 } from '../schema/trade-yield-persistence-schema.js';
+import {
+  _TradeDailyMTMSeries,
+  makeTradeDateSk,
+} from '../identity/_trade-daily-mtm-series.js';
 import {
   _SubTradeYieldUnit,
   makeContextTradeSubTradeUnitSk,
@@ -508,6 +513,88 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
     }
   }
 
+  // ── Daily MTM series I/O (E11.5) ────────────────────────────────────────────
+
+  /**
+   * Idempotent batch put of daily MTM rows. Each row's `tradeDateSk` must be
+   * pre-populated via `makeTradeDateSk(tradeUuid, dateEpoch)`. Same-key writes
+   * silently overwrite — the populator is allowed to recompute and re-put any
+   * date without first deleting.
+   */
+  async putDailyMTMRows(rows: _TradeDailyMTMSeries[]): Promise<void> {
+    const log = this.#log.setMethod('putDailyMTMRows');
+    if (rows.length === 0) return;
+    try {
+      await this.#dynamo.batchPut({[TRADE_DAILY_MTM_SERIES]: rows});
+      log.info(`putDailyMTMRows: wrote ${rows.length} rows`);
+    } catch (err) {
+      throw logAndEnhanceError(log, err as Error);
+    }
+  }
+
+  /**
+   * All daily-MTM rows for one trade, base-SK-sorted ascending by date. Empty
+   * array (NOT undefined) when the populator hasn't run for this trade yet —
+   * callers use that signal to decide whether to enqueue the populator.
+   */
+  async queryDailyMTMSeriesForTrade(tradeUuid: TradeUUID): Promise<_TradeDailyMTMSeries[]> {
+    const log = this.#log.setMethod('queryDailyMTMSeriesForTrade');
+    const owner = getSessionOwner(this.ec) as AccountOwner;
+    try {
+      const keyExpr: KeyStructuredExpression = {
+        partitionFieldName: 'owner',
+        operator: '=',
+        value: owner,
+        sortFieldName: 'tradeDateSk',
+        sortOperator: 'begins_with',
+        sortValue: `${tradeUuid}#`,
+      };
+      return await this.#dynamo.query<_TradeDailyMTMSeries>(TRADE_DAILY_MTM_SERIES, false, keyExpr);
+    } catch (err) {
+      throw logAndEnhanceError(log, err as Error);
+    }
+  }
+
+  /**
+   * Emergent watchlist for the nightly tail-extender: distinct `tradeUuid`
+   * values for the session owner. Implemented as a single-owner Query +
+   * client-side dedup since the partition is owner-scoped.
+   */
+  async getDistinctTradeUuidsWithDailyMTM(): Promise<TradeUUID[]> {
+    const log = this.#log.setMethod('getDistinctTradeUuidsWithDailyMTM');
+    const owner = getSessionOwner(this.ec) as AccountOwner;
+    try {
+      const rows = await this.#dynamo.query<_TradeDailyMTMSeries>(
+        TRADE_DAILY_MTM_SERIES, false,
+        {partitionFieldName: 'owner', operator: '=', value: owner},
+      );
+      const seen = new Set<TradeUUID>();
+      for (const r of rows) seen.add(r.tradeUuid);
+      return Array.from(seen);
+    } catch (err) {
+      throw logAndEnhanceError(log, err as Error);
+    }
+  }
+
+  /**
+   * Delete every daily-MTM row for one trade. Used by trade-deletion +
+   * yield-math invalidation. Repopulator will rebuild on next view.
+   */
+  async deleteDailyMTMSeriesForTrade(tradeUuid: TradeUUID): Promise<number> {
+    const log = this.#log.setMethod('deleteDailyMTMSeriesForTrade');
+    try {
+      const rows = await this.queryDailyMTMSeriesForTrade(tradeUuid);
+      if (rows.length === 0) return 0;
+      const keys = rows.map(r => ({owner: r.owner, tradeDateSk: r.tradeDateSk}));
+      const count = keys.length;
+      await this.#dynamo.batchDelete({[TRADE_DAILY_MTM_SERIES]: keys});
+      log.info(`deleteDailyMTMSeriesForTrade: tradeUuid=${tradeUuid} count=${count}`);
+      return count;
+    } catch (err) {
+      throw logAndEnhanceError(log, err as Error);
+    }
+  }
+
   // ── Cascade-delete ──────────────────────────────────────────────────────────
 
   /**
@@ -523,12 +610,13 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
     const owner = getSessionOwner(this.ec) as AccountOwner;
     const _t = Date.now();
     try {
-      const [segmentRows, unitRows, openRow, asOfRows, sinceRows] = await Promise.all([
+      const [segmentRows, unitRows, openRow, asOfRows, sinceRows, dailyMTMRows] = await Promise.all([
         this.#queryAllSegmentsForTrade(tradeUuid),
         this.#queryAllUnitsForTrade(tradeUuid),
         this.#dynamo.get<_OpenTradeYieldSummary>(OPEN_TRADE_YIELD_SUMMARIES, {owner, tradeUuid}),
         this.getAsOfTradeSummaryRowsForTrade(tradeUuid),
         this.getSinceTradeSummaryRowsForTrade(tradeUuid),
+        this.queryDailyMTMSeriesForTrade(tradeUuid),
       ]);
       let total = 0;
 
@@ -558,6 +646,12 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
         const keys = sinceRows.map(r => ({owner: r.owner, sinceAnchorTradeUuidSk: r.sinceAnchorTradeUuidSk}));
         const count = keys.length;
         await this.#dynamo.batchDelete({[SINCE_TRADE_YIELD_SUMMARIES]: keys});
+        total += count;
+      }
+      if (dailyMTMRows.length > 0) {
+        const keys = dailyMTMRows.map(r => ({owner: r.owner, tradeDateSk: r.tradeDateSk}));
+        const count = keys.length;
+        await this.#dynamo.batchDelete({[TRADE_DAILY_MTM_SERIES]: keys});
         total += count;
       }
       log.timing(`[trace:trade-yield-persistence] deleteByTrade: ${Date.now() - _t}ms | tradeUuid=${tradeUuid} total=${total}`);

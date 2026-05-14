@@ -17,6 +17,10 @@ export const SUB_TRADE_YIELD_UNITS = 'SUB_TRADE_YIELD_UNITS';
 export const OPEN_TRADE_YIELD_SUMMARIES = 'OPEN_TRADE_YIELD_SUMMARIES';
 export const AS_OF_TRADE_YIELD_SUMMARIES = 'AS_OF_TRADE_YIELD_SUMMARIES';
 export const SINCE_TRADE_YIELD_SUMMARIES = 'SINCE_TRADE_YIELD_SUMMARIES';
+// E11.5: lazy-populated daily MTM series for the FE temporal-segment chart.
+// One row per (owner, tradeUuid, dateEpoch). Watchlist for the nightly
+// tail-extender is emergent from distinct tradeUuid values in this table.
+export const TRADE_DAILY_MTM_SERIES = 'TRADE_DAILY_MTM_SERIES';
 
 // LSI name shared by every table that needs per-trade drill-down across owner-partition.
 export const BY_TRADE_INDEX = 'byTrade-index';
@@ -150,6 +154,24 @@ const tradeYieldPersistenceSchema: SchemaSequence = {
           ],
           Projection: {ProjectionType: 'ALL'}
         }
+      ],
+      BillingMode: 'PAY_PER_REQUEST',
+      DeletionProtectionEnabled: true,
+      TableClass: 'STANDARD'
+    },
+    {
+      // Daily MTM series — one row per (owner, tradeUuid, dateEpoch). The chart
+      // reads all rows for one trade via base-SK prefix scan `'${tradeUuid}#'`.
+      // No LSI needed: every read path is per-trade, and the nightly tail-extender
+      // derives its watchlist by scanning distinct tradeUuid values from the base.
+      TableName: TRADE_DAILY_MTM_SERIES,
+      AttributeDefinitions: [
+        {AttributeName: 'owner', AttributeType: 'S'},
+        {AttributeName: 'tradeDateSk', AttributeType: 'S'}
+      ],
+      KeySchema: [
+        {AttributeName: 'owner', KeyType: 'HASH'},
+        {AttributeName: 'tradeDateSk', KeyType: 'RANGE'}
       ],
       BillingMode: 'PAY_PER_REQUEST',
       DeletionProtectionEnabled: true,
