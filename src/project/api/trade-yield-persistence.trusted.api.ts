@@ -605,9 +605,14 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * fact row in every context. Used by `trade-deletion-orchestrator` and by the
    * trade-uuid rotation path.
    *
-   * Returns total rows deleted across all five tables.
+   * Returns `{deleted, asOfDatesTouched}`. The caller is expected to chain a
+   * cascade-delete of the AS_OF_*_GAINS rows for the touched dates via
+   * `GainSnapshotsTrustedApi.deleteAsOfRowsForDates(asOfDatesTouched)` (as-of-
+   * gain-reconstitution PRD E11 / D14). Splitting the cross-package call to
+   * the caller keeps trade-yield-persistence's config.json minimal and avoids
+   * coupling this package to gain-snapshots at the dependency level.
    */
-  async deleteByTrade(tradeUuid: TradeUUID): Promise<number> {
+  async deleteByTrade(tradeUuid: TradeUUID): Promise<{deleted: number; asOfDatesTouched: Datestamp[]}> {
     const log = this.#log.setMethod('deleteByTrade');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     const _t = Date.now();
@@ -638,6 +643,8 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
         await this.#dynamo.batchDelete({[OPEN_TRADE_YIELD_SUMMARIES]: [{owner, tradeUuid}]});
         total += 1;
       }
+      // Collected for cascade-delete by the caller (as-of-gain-reconstitution PRD E11/D14).
+      const asOfDatesTouched = [...new Set(asOfRows.map(r => r.asOfDate))];
       if (asOfRows.length > 0) {
         const keys = asOfRows.map(r => ({owner: r.owner, asOfDateTradeUuidSk: r.asOfDateTradeUuidSk}));
         const count = keys.length;
@@ -656,8 +663,8 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
         await this.#dynamo.batchDelete({[TRADE_DAILY_MTM_SERIES]: keys});
         total += count;
       }
-      log.timing(`[trace:trade-yield-persistence] deleteByTrade: ${Date.now() - _t}ms | tradeUuid=${tradeUuid} total=${total}`);
-      return total;
+      log.timing(`[trace:trade-yield-persistence] deleteByTrade: ${Date.now() - _t}ms | tradeUuid=${tradeUuid} total=${total} asOfDatesTouched=${asOfDatesTouched.length}`);
+      return {deleted: total, asOfDatesTouched};
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }

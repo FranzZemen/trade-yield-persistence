@@ -236,8 +236,9 @@ suite('trade-yield-persistence round-trip integration', function () {
       gainSince: 50,
     });
 
-    const deleted = await api.deleteByTrade(tradeUuid1);
+    const {deleted, asOfDatesTouched} = await api.deleteByTrade(tradeUuid1);
     expect(deleted).to.be.greaterThan(0);
+    expect(asOfDatesTouched, 'asOfDatesTouched should report the date the deleted trade contributed to').to.deep.equal(['2026-04-21']);
 
     expect(await api.getOpenTradeSummary(tradeUuid1)).to.be.undefined;
     expect(await api.getAsOfTradeSummary(tradeUuid1, '2026-04-21' as Datestamp)).to.be.undefined;
