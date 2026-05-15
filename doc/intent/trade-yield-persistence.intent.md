@@ -10,7 +10,7 @@ Single owner of DynamoDB persistence for the trade-yield-segment model. Replaces
 - **Key encoders** for every SK shape (one helper per table; located alongside the `_<row>.ts` identity files).
 - **Trusted I/O** — `TradeYieldPersistenceTrustedApi` (`api/trade-yield-persistence.trusted.api.ts`).
 - **Projection helpers** — `to<PublicType>(row)` functions that strip persistence-only fields.
-- **Cascade orchestration** — `deleteByTrade(tradeUuid)` is the only cross-table sweep; consumers MUST NOT delete table-by-table.
+- **Cascade orchestration** — `deleteByTrade(tradeUuid)` is the only cross-table sweep INSIDE this package; consumers MUST NOT delete table-by-table. As of 0.4.x the call returns `{deleted: number, asOfDatesTouched: Datestamp[]}` so callers can chain the sibling AS_OF_*_GAINS cascade in `@franzzemen/gain-snapshots` (`GainSnapshotsTrustedApi.deleteAsOfRowsForDates(asOfDatesTouched)`). The chain lives in the orchestrator layer rather than inside this package to keep `trade-yield-persistence` free of a gain-snapshots dependency edge (and its `config.json` free of gain-table mappings).
 
 ## Does not own
 
