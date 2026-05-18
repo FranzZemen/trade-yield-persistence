@@ -48,10 +48,10 @@
     }
   },
   "dependencies": {
-    "@franzzemen/aws-app": "^27.3.37",
-    "@franzzemen/endpoint-application": "^10.3.112",
-    "@franzzemen/endpoint-financial-identity": "^7.0.247",
-    "@franzzemen/enhanced-error": "^8.1.190",
+    "@franzzemen/aws-app": "^27.3.38",
+    "@franzzemen/endpoint-application": "^10.3.113",
+    "@franzzemen/endpoint-financial-identity": "^7.0.248",
+    "@franzzemen/enhanced-error": "^8.1.191",
     "@franzzemen/execution-context": "^16.1.12",
     "@franzzemen/financial-identity": "^64.5.2",
     "@franzzemen/logger": "^104.0.27",
