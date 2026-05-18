@@ -48,7 +48,7 @@
     }
   },
   "dependencies": {
-    "@franzzemen/admin-identity": "^0.0.2",
+    "@franzzemen/admin-identity": "^0.0.3",
     "@franzzemen/aws-app": "^27.3.40",
     "@franzzemen/endpoint-application": "^10.3.115",
     "@franzzemen/endpoint-financial-identity": "^7.0.250",

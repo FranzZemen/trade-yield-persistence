@@ -359,6 +359,58 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
     }
   }
 
+  /**
+   * Admin helper (persistence-row-provenance.prd.md E10): return open-trade
+   * summary rows whose provenance `writtenAt` is older than `cutoffEpoch` OR
+   * whose `writtenAt` is missing (pre-PRD rows). Useful for staleness audits
+   * and the audit-pipeline `excessive-staleness` check.
+   */
+  async findStaleOpenTradeSummaries(cutoffEpoch: number): Promise<_OpenTradeYieldSummary[]> {
+    const log = this.#log.setMethod('findStaleOpenTradeSummaries');
+    try {
+      const all = await this.getAllOpenTradeSummaryRows();
+      return all.filter(r => r.writtenAt === undefined || r.writtenAt === null || r.writtenAt < cutoffEpoch);
+    } catch (err) {
+      throw logAndEnhanceError(log, err as Error);
+    }
+  }
+
+  /**
+   * Admin helper (E10): aggregate open-trade summaries by a provenance attribute.
+   * `groupBy` selects which attribute keys the result map. Returns a Map keyed by
+   * the attribute value (or `'(unknown / pre-provenance)'` for rows missing it)
+   * with `{count, sampleTradeUuids, firstWrittenAt, lastWrittenAt}` per group.
+   *
+   * Use case: "which writer is producing the most rows right now?" — answer is
+   * a single Query+groupBy without leaving the persistence package.
+   */
+  async groupOpenSummariesByProvenance(
+    groupBy: 'writerLambda' | 'startedBy' | 'writerVersion',
+  ): Promise<Map<string, {count: number; sampleTradeUuids: TradeUUID[]; firstWrittenAt: number | null; lastWrittenAt: number | null}>> {
+    const log = this.#log.setMethod('groupOpenSummariesByProvenance');
+    try {
+      const all = await this.getAllOpenTradeSummaryRows();
+      const groups = new Map<string, {count: number; sampleTradeUuids: TradeUUID[]; firstWrittenAt: number | null; lastWrittenAt: number | null}>();
+      for (const r of all) {
+        const key = (r as Partial<{writerLambda: string; startedBy: string; writerVersion: string}>)[groupBy] ?? '(unknown / pre-provenance)';
+        let g = groups.get(key);
+        if (!g) {
+          g = {count: 0, sampleTradeUuids: [], firstWrittenAt: null, lastWrittenAt: null};
+          groups.set(key, g);
+        }
+        g.count += 1;
+        if (g.sampleTradeUuids.length < 3) g.sampleTradeUuids.push(r.tradeUuid);
+        if (r.writtenAt !== undefined && r.writtenAt !== null) {
+          if (g.firstWrittenAt === null || r.writtenAt < g.firstWrittenAt) g.firstWrittenAt = r.writtenAt;
+          if (g.lastWrittenAt  === null || r.writtenAt > g.lastWrittenAt)  g.lastWrittenAt  = r.writtenAt;
+        }
+      }
+      return groups;
+    } catch (err) {
+      throw logAndEnhanceError(log, err as Error);
+    }
+  }
+
   // ── AS_OF summary I/O ───────────────────────────────────────────────────────
 
   /**
