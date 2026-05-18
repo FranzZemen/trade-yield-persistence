@@ -3,6 +3,7 @@ Created by Franz Zemen 05/11/2026
 License Type: UNLICENSED
 */
 
+import {Provenance} from '@franzzemen/admin-identity';
 import {DBRecord} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {
@@ -62,7 +63,10 @@ export type _OpenTradeYieldSummary = DBRecord & {
   // E11.5 cache-quality: see TradeYieldSegmentSummary docstring.
   priceCoverage?: number;
   recomputeAttempts?: number;
-};
+} & Partial<Provenance>;
+// Provenance fields (startedBy, jobId, writerLambda, writerVersion, writtenAt) are
+// optional on the row for read-tolerance with pre-PRD rows; required on the put-method
+// parameter. See persistence-row-provenance.prd.md.
 
 /**
  * Project a persisted `_OpenTradeYieldSummary` to the public

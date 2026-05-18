@@ -3,6 +3,7 @@ Created by Franz Zemen 05/11/2026
 License Type: UNLICENSED
 */
 
+import {Provenance} from '@franzzemen/admin-identity';
 import {DBRecord} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {SubTradeUUID, SubTradeYieldUnit, SubTradeYieldUnitUUID, TradeUUID} from '@franzzemen/financial-identity';
@@ -26,7 +27,9 @@ export type _SubTradeYieldUnit = DBRecord & {
   contextTradeSubTradeUnitSk: string;
   tradeContextSubTradeUnitSk: string;
   unit: SubTradeYieldUnit;
-};
+} & Partial<Provenance>;
+// Provenance fields optional on row for read-tolerance; required on put-method parameter.
+// See persistence-row-provenance.prd.md.
 
 export function makeContextTradeSubTradeUnitSk(
   context: YieldContext,

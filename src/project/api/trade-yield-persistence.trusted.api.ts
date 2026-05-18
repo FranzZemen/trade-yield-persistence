@@ -3,6 +3,7 @@ Created by Franz Zemen 05/11/2026
 License Type: UNLICENSED
 */
 
+import {Provenance} from '@franzzemen/admin-identity';
 import {Dynamo, KeyStructuredExpression} from '@franzzemen/aws-app/dynamo';
 import {EndpointApplicationsApi, getSessionOwner} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
@@ -130,14 +131,31 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   // ── Fact-row writes ─────────────────────────────────────────────────────────
 
   /**
+   * Spread Provenance fields onto each row in place. Used by every public put
+   * method before invoking batchPut, so every row in every table carries a
+   * uniform write-time stamp (persistence-row-provenance.prd.md D1).
+   */
+  #stampRows<T extends Partial<Provenance>>(rows: T[], provenance: Provenance): void {
+    for (const r of rows) {
+      r.startedBy     = provenance.startedBy;
+      r.jobId         = provenance.jobId;
+      r.writerLambda  = provenance.writerLambda;
+      r.writerVersion = provenance.writerVersion;
+      r.writtenAt     = provenance.writtenAt;
+    }
+  }
+
+  /**
    * Batch-put per-segment fact rows. Caller is responsible for populating the
    * row's `contextTradeStartSk` and `tradeContextStartSk` via the helpers
-   * exposed here (`buildSegmentRow`).
+   * exposed here (`buildSegmentRow`). Provenance is stamped onto every row
+   * before write (persistence-row-provenance.prd.md D1).
    */
-  async putSegmentRows(rows: _TradeYieldSegment[]): Promise<void> {
+  async putSegmentRows(rows: _TradeYieldSegment[], provenance: Provenance): Promise<void> {
     const log = this.#log.setMethod('putSegmentRows');
     if (rows.length === 0) return;
     try {
+      this.#stampRows(rows, provenance);
       await this.#dynamo.batchPut({[TRADE_YIELD_SEGMENTS]: rows});
       log.info(`putSegmentRows: wrote ${rows.length} rows`);
     } catch (err) {
@@ -145,11 +163,12 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
     }
   }
 
-  /** Batch-put per-sub-trade-yield-unit fact rows. */
-  async putSubTradeYieldUnitRows(rows: _SubTradeYieldUnit[]): Promise<void> {
+  /** Batch-put per-sub-trade-yield-unit fact rows. Provenance-stamped per D1. */
+  async putSubTradeYieldUnitRows(rows: _SubTradeYieldUnit[], provenance: Provenance): Promise<void> {
     const log = this.#log.setMethod('putSubTradeYieldUnitRows');
     if (rows.length === 0) return;
     try {
+      this.#stampRows(rows, provenance);
       await this.#dynamo.batchPut({[SUB_TRADE_YIELD_UNITS]: rows});
       log.info(`putSubTradeYieldUnitRows: wrote ${rows.length} rows`);
     } catch (err) {
@@ -249,6 +268,7 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    */
   async putOpenTradeSummary(
     summary: TradeYieldSegmentSummary,
+    provenance: Provenance,
     opts?: {existsCheck?: () => Promise<boolean>},
   ): Promise<void> {
     const log = this.#log.setMethod('putOpenTradeSummary');
@@ -262,8 +282,8 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
       const segmentRows = summary.segments.map(s => this.buildSegmentRow(OPEN_CONTEXT, s));
       const unitRows = summary.subTradeYieldUnits.map(u => this.buildSubTradeYieldUnitRow(OPEN_CONTEXT, u));
-      if (segmentRows.length > 0) await this.putSegmentRows(segmentRows);
-      if (unitRows.length > 0) await this.putSubTradeYieldUnitRows(unitRows);
+      if (segmentRows.length > 0) await this.putSegmentRows(segmentRows, provenance);
+      if (unitRows.length > 0) await this.putSubTradeYieldUnitRows(unitRows, provenance);
 
       const row: _OpenTradeYieldSummary = {
         owner,
@@ -295,9 +315,10 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       if (summary.explanation !== undefined) row.explanation = summary.explanation;
       if (summary.priceCoverage !== undefined) row.priceCoverage = summary.priceCoverage;
       if (summary.recomputeAttempts !== undefined) row.recomputeAttempts = summary.recomputeAttempts;
+      this.#stampRows([row], provenance);
 
       await this.#dynamo.batchPut({[OPEN_TRADE_YIELD_SUMMARIES]: [row]});
-      log.info(`putOpenTradeSummary: tradeUuid=${summary.tradeUuid} segments=${segmentRows.length} units=${unitRows.length}`);
+      log.info(`putOpenTradeSummary: tradeUuid=${summary.tradeUuid} segments=${segmentRows.length} units=${unitRows.length} startedBy=${provenance.startedBy}`);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -351,22 +372,23 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    */
   async putAsOfTradeSummary(
     summary: AsOfTradeYieldSegmentSummary,
-    audit?: {startedBy?: string; jobId?: string; existsCheck?: () => Promise<boolean>},
+    provenance: Provenance,
+    opts?: {existsCheck?: () => Promise<boolean>},
   ): Promise<void> {
     const log = this.#log.setMethod('putAsOfTradeSummary');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     const context = asOfContext(summary.asOfDate);
     try {
-      if (audit?.existsCheck) {
-        const exists = await audit.existsCheck();
+      if (opts?.existsCheck) {
+        const exists = await opts.existsCheck();
         if (!exists) throw new OrphanTradeError(summary.tradeUuid, 'as-of');
       }
       await this.deleteFactRowsByTradeAndContext(summary.tradeUuid, context);
 
       const segmentRows = summary.segments.map(s => this.buildSegmentRow(context, s));
       const unitRows = summary.subTradeYieldUnits.map(u => this.buildSubTradeYieldUnitRow(context, u));
-      if (segmentRows.length > 0) await this.putSegmentRows(segmentRows);
-      if (unitRows.length > 0) await this.putSubTradeYieldUnitRows(unitRows);
+      if (segmentRows.length > 0) await this.putSegmentRows(segmentRows, provenance);
+      if (unitRows.length > 0) await this.putSubTradeYieldUnitRows(unitRows, provenance);
 
       const row: _AsOfTradeYieldSummary = {
         owner,
@@ -402,11 +424,10 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       if (summary.priceSource !== undefined) row.priceSource = summary.priceSource;
       if (summary.closingDate !== undefined) row.closingDate = summary.closingDate;
       if (summary.explanation !== undefined) row.explanation = summary.explanation;
-      if (audit?.startedBy !== undefined) row.startedBy = audit.startedBy;
-      if (audit?.jobId !== undefined) row.jobId = audit.jobId;
+      this.#stampRows([row], provenance);
 
       await this.#dynamo.batchPut({[AS_OF_TRADE_YIELD_SUMMARIES]: [row]});
-      log.info(`putAsOfTradeSummary: tradeUuid=${summary.tradeUuid} asOfDate=${summary.asOfDate} segments=${segmentRows.length} units=${unitRows.length}`);
+      log.info(`putAsOfTradeSummary: tradeUuid=${summary.tradeUuid} asOfDate=${summary.asOfDate} segments=${segmentRows.length} units=${unitRows.length} startedBy=${provenance.startedBy}`);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -467,7 +488,7 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   async putSinceTradeSummary(
     summary: SinceTradeYieldSegmentSummary,
-    audit?: {startedBy?: string; jobId?: string},
+    provenance: Provenance,
   ): Promise<void> {
     const log = this.#log.setMethod('putSinceTradeSummary');
     const owner = getSessionOwner(this.ec) as AccountOwner;
@@ -477,8 +498,8 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
       const segmentRows = summary.segments.map(s => this.buildSegmentRow(context, s));
       const unitRows = summary.subTradeYieldUnits.map(u => this.buildSubTradeYieldUnitRow(context, u));
-      if (segmentRows.length > 0) await this.putSegmentRows(segmentRows);
-      if (unitRows.length > 0) await this.putSubTradeYieldUnitRows(unitRows);
+      if (segmentRows.length > 0) await this.putSegmentRows(segmentRows, provenance);
+      if (unitRows.length > 0) await this.putSubTradeYieldUnitRows(unitRows, provenance);
 
       const row: _SinceTradeYieldSummary = {
         owner,
@@ -512,11 +533,10 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       if (summary.priceSource !== undefined) row.priceSource = summary.priceSource;
       if (summary.closingDate !== undefined) row.closingDate = summary.closingDate;
       if (summary.explanation !== undefined) row.explanation = summary.explanation;
-      if (audit?.startedBy !== undefined) row.startedBy = audit.startedBy;
-      if (audit?.jobId !== undefined) row.jobId = audit.jobId;
+      this.#stampRows([row], provenance);
 
       await this.#dynamo.batchPut({[SINCE_TRADE_YIELD_SUMMARIES]: [row]});
-      log.info(`putSinceTradeSummary: tradeUuid=${summary.tradeUuid} anchor=${summary.sinceAnchorEpoch}`);
+      log.info(`putSinceTradeSummary: tradeUuid=${summary.tradeUuid} anchor=${summary.sinceAnchorEpoch} startedBy=${provenance.startedBy}`);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -569,12 +589,13 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * silently overwrite — the populator is allowed to recompute and re-put any
    * date without first deleting.
    */
-  async putDailyMTMRows(rows: _TradeDailyMTMSeries[]): Promise<void> {
+  async putDailyMTMRows(rows: _TradeDailyMTMSeries[], provenance: Provenance): Promise<void> {
     const log = this.#log.setMethod('putDailyMTMRows');
     if (rows.length === 0) return;
     try {
+      this.#stampRows(rows, provenance);
       await this.#dynamo.batchPut({[TRADE_DAILY_MTM_SERIES]: rows});
-      log.info(`putDailyMTMRows: wrote ${rows.length} rows`);
+      log.info(`putDailyMTMRows: wrote ${rows.length} rows startedBy=${provenance.startedBy}`);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }

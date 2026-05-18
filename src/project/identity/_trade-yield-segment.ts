@@ -3,6 +3,7 @@ Created by Franz Zemen 05/11/2026
 License Type: UNLICENSED
 */
 
+import {Provenance} from '@franzzemen/admin-identity';
 import {DBRecord} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {TradeYieldSegment, TradeYieldSegmentUUID, TradeUUID} from '@franzzemen/financial-identity';
@@ -33,7 +34,9 @@ export type _TradeYieldSegment = DBRecord & {
   contextTradeStartSk: string;
   tradeContextStartSk: string;
   segment: TradeYieldSegment;
-};
+} & Partial<Provenance>;
+// Provenance fields optional on row for read-tolerance; required on put-method parameter.
+// See persistence-row-provenance.prd.md.
 
 export function makeContextTradeStartSk(context: YieldContext, tradeUuid: TradeUUID, startEpoch: number, segmentUuid: TradeYieldSegmentUUID): string {
   return `${context}#${tradeUuid}#${padEpoch(startEpoch)}#${segmentUuid}`;

@@ -12,6 +12,7 @@ Requires AWSSECRET env var; suite is skipped otherwise.
 
 import 'mocha';
 import {expect} from 'chai';
+import {Provenance} from '@franzzemen/admin-identity';
 import {ExecutionContext} from '@franzzemen/execution-context';
 import {endpointContextKey} from '@franzzemen/endpoint-application';
 import {
@@ -43,6 +44,14 @@ const secret = process.env['AWSSECRET'];
 const suite = secret ? describe : describe.skip;
 
 const owner: AccountOwner = 'e3ce6f67-1670-4ace-b28d-1bacef21dccf.user' as AccountOwner;
+
+const testProvenance: Provenance = {
+  startedBy:     'test:trade-yield-persistence-round-trip',
+  jobId:         'test-job',
+  writerLambda:  'local:round-trip-integration.test',
+  writerVersion: '0.0.0-test',
+  writtenAt:     Date.now(),
+};
 
 function makeSegment(tradeUuid: TradeUUID, startEpoch: number, endEpoch: number | null, denominator: number, gain: number): TradeYieldSegment {
   return {
@@ -156,7 +165,7 @@ suite('trade-yield-persistence round-trip integration', function () {
     ];
     const units = [makeUnit(tradeUuid1)];
     const summary = makeOpenSummary(tradeUuid1, segments, units);
-    await api.putOpenTradeSummary(summary);
+    await api.putOpenTradeSummary(summary, testProvenance);
 
     const read = await api.getOpenTradeSummary(tradeUuid1);
     expect(read, 'summary should exist').to.exist;
@@ -169,13 +178,13 @@ suite('trade-yield-persistence round-trip integration', function () {
 
   it('open: second putOpenTradeSummary replaces prior fact rows (no accumulation)', async () => {
     const v1Segments = [makeSegment(tradeUuid1, 1_700_000_000_000, null, 500, 25)];
-    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, v1Segments, []));
+    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, v1Segments, []), testProvenance);
 
     const v2Segments = [
       makeSegment(tradeUuid1, 1_700_000_000_000, 1_700_086_400_000, 800, 40),
       makeSegment(tradeUuid1, 1_700_086_400_000, null, 1200, 60),
     ];
-    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, v2Segments, []));
+    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, v2Segments, []), testProvenance);
 
     const read = await api.getOpenTradeSummary(tradeUuid1);
     expect(read!.segments.length).to.equal(2);
@@ -184,7 +193,7 @@ suite('trade-yield-persistence round-trip integration', function () {
 
   it('asOf: puts and reads back independently of open context', async () => {
     const openSegments = [makeSegment(tradeUuid1, 1_700_000_000_000, null, 1000, 50)];
-    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, openSegments, []));
+    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, openSegments, []), testProvenance);
 
     const asOfDate = '2026-04-21' as Datestamp;
     const asOfSegments = [makeSegment(tradeUuid1, 1_700_000_000_000, null, 500, 25)];
@@ -194,7 +203,7 @@ suite('trade-yield-persistence round-trip integration', function () {
       asOfEpoch: new Date(`${asOfDate}T20:00:00Z`).getTime(),
       priceCoverage: 1.0,
     };
-    await api.putAsOfTradeSummary(asOfSummary);
+    await api.putAsOfTradeSummary(asOfSummary, testProvenance);
 
     const readAsOf = await api.getAsOfTradeSummary(tradeUuid1, asOfDate);
     expect(readAsOf!.peakSimultaneousCaR).to.equal(500);
@@ -214,7 +223,7 @@ suite('trade-yield-persistence round-trip integration', function () {
       sinceAnchorEpoch: anchor,
       gainSince: 40,
     };
-    await api.putSinceTradeSummary(sinceSummary);
+    await api.putSinceTradeSummary(sinceSummary, testProvenance);
 
     const read = await api.getSinceTradeSummary(tradeUuid1, anchor);
     expect(read!.gainSince).to.equal(40);
@@ -223,18 +232,18 @@ suite('trade-yield-persistence round-trip integration', function () {
 
   it('deleteByTrade sweeps every context and every table', async () => {
     const segs = [makeSegment(tradeUuid1, 1_700_000_000_000, null, 1000, 50)];
-    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, segs, [makeUnit(tradeUuid1)]));
+    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, segs, [makeUnit(tradeUuid1)]), testProvenance);
     await api.putAsOfTradeSummary({
       ...makeOpenSummary(tradeUuid1, segs, []),
       asOfDate: '2026-04-21' as Datestamp,
       asOfEpoch: 1_700_086_400_000,
       priceCoverage: 1.0,
-    });
+    }, testProvenance);
     await api.putSinceTradeSummary({
       ...makeOpenSummary(tradeUuid1, segs, []),
       sinceAnchorEpoch: 1_700_000_000_000,
       gainSince: 50,
-    });
+    }, testProvenance);
 
     const {deleted, asOfDatesTouched} = await api.deleteByTrade(tradeUuid1);
     expect(deleted).to.be.greaterThan(0);
@@ -249,14 +258,14 @@ suite('trade-yield-persistence round-trip integration', function () {
 
   it('contexts isolate: deleteFactRowsByTradeAndContext for open does not touch asOf', async () => {
     const segs = [makeSegment(tradeUuid1, 1_700_000_000_000, null, 1000, 50)];
-    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, segs, []));
+    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, segs, []), testProvenance);
     const asOfDate = '2026-04-21' as Datestamp;
     await api.putAsOfTradeSummary({
       ...makeOpenSummary(tradeUuid1, segs, []),
       asOfDate,
       asOfEpoch: 1_700_086_400_000,
       priceCoverage: 1.0,
-    });
+    }, testProvenance);
 
     await api.deleteFactRowsByTradeAndContext(tradeUuid1, OPEN_CONTEXT);
 
@@ -265,8 +274,8 @@ suite('trade-yield-persistence round-trip integration', function () {
   });
 
   it('multi-trade owner scan: getAllOpenTradeSummaryRows returns scalars for both trades', async () => {
-    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, [makeSegment(tradeUuid1, 1_700_000_000_000, null, 1000, 50)], []));
-    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid2, [makeSegment(tradeUuid2, 1_700_000_000_000, null, 2000, 100)], []));
+    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid1, [makeSegment(tradeUuid1, 1_700_000_000_000, null, 1000, 50)], []), testProvenance);
+    await api.putOpenTradeSummary(makeOpenSummary(tradeUuid2, [makeSegment(tradeUuid2, 1_700_000_000_000, null, 2000, 100)], []), testProvenance);
 
     const rows = await api.getAllOpenTradeSummaryRows();
     const ours = rows.filter(r => r.tradeUuid === tradeUuid1 || r.tradeUuid === tradeUuid2);

@@ -3,6 +3,7 @@ Created by Franz Zemen 05/14/2026
 License Type: UNLICENSED
 */
 
+import {Provenance} from '@franzzemen/admin-identity';
 import {DBRecord} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {Archetype, TradeUUID} from '@franzzemen/financial-identity';
@@ -61,7 +62,9 @@ export type _TradeDailyMTMSeries = DBRecord & {
   priceCoverage: number;
 
   computedAt: number;
-};
+} & Partial<Provenance>;
+// Provenance fields optional on row for read-tolerance; required on put-method parameter.
+// See persistence-row-provenance.prd.md.
 
 export function makeTradeDateSk(tradeUuid: TradeUUID, dateEpoch: number): string {
   return `${tradeUuid}#${padEpoch(dateEpoch)}`;

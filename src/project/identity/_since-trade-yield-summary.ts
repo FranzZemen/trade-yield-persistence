@@ -3,6 +3,7 @@ Created by Franz Zemen 05/11/2026
 License Type: UNLICENSED
 */
 
+import {Provenance} from '@franzzemen/admin-identity';
 import {DBRecord} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {
@@ -63,10 +64,9 @@ export type _SinceTradeYieldSummary = DBRecord & {
   closingDate?: Datestamp;
   computedAt: number;
   explanation?: string;
-
-  startedBy?: string;
-  jobId?: string;
-};
+} & Partial<Provenance>;
+// Provenance fields (startedBy, jobId, writerLambda, writerVersion, writtenAt) optional on
+// row for read-tolerance; required on put-method parameter. See persistence-row-provenance.prd.md.
 
 export function makeSinceAnchorTradeUuidSk(sinceAnchorEpoch: number, tradeUuid: TradeUUID): string {
   return `${padEpoch(sinceAnchorEpoch)}#${tradeUuid}`;

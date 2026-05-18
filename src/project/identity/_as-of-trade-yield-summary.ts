@@ -3,6 +3,7 @@ Created by Franz Zemen 05/11/2026
 License Type: UNLICENSED
 */
 
+import {Provenance} from '@franzzemen/admin-identity';
 import {DBRecord} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {
@@ -65,10 +66,10 @@ export type _AsOfTradeYieldSummary = DBRecord & {
   closingDate?: Datestamp;
   computedAt: number;
   explanation?: string;
-
-  startedBy?: string;
-  jobId?: string;
-};
+} & Partial<Provenance>;
+// startedBy + jobId — formerly flat on this row — are now part of Partial<Provenance>
+// along with writerLambda, writerVersion, writtenAt. Optional on the row for read-tolerance
+// with pre-PRD rows; required on the put-method parameter. See persistence-row-provenance.prd.md.
 
 export function makeAsOfDateTradeUuidSk(asOfDate: Datestamp, tradeUuid: TradeUUID): string {
   return `${asOfDate}#${tradeUuid}`;
