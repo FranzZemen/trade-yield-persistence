@@ -92,6 +92,31 @@ export type DateRange = {
  *      summary row + segment + unit hydration into one DTO.
  *   4. Cascade-delete primitives keyed by trade uuid OR by context.
  */
+/**
+ * Thrown by `putOpenTradeSummary` / `putAsOfTradeSummary` when the caller-supplied
+ * `existsCheck` returns false — i.e. the underlying trade row no longer exists in
+ * `financials.trades` at write time. Persisting a summary for a deleted trade
+ * creates an orphan that distorts every downstream aggregate. The error is
+ * deliberately a distinct class so callers can `catch` it specifically and treat
+ * a race-with-cascade-delete as a benign skip (log + continue) rather than a
+ * chunk failure. See `feedback_never_instrument_node_modules` for the discipline
+ * rule that surfaced this guard.
+ */
+export class OrphanTradeError extends Error {
+  readonly tradeUuid: string;
+  readonly persistOp: 'open' | 'as-of';
+  constructor(tradeUuid: string, persistOp: 'open' | 'as-of') {
+    super(`Refusing to persist ${persistOp} summary — tradeUuid=${tradeUuid} does not exist`);
+    this.name = 'OrphanTradeError';
+    this.tradeUuid = tradeUuid;
+    this.persistOp = persistOp;
+  }
+}
+
+export function isOrphanTradeError(err: unknown): err is OrphanTradeError {
+  return err instanceof Error && err.name === 'OrphanTradeError';
+}
+
 export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   #log: LoggerApi;
   #dynamo: Dynamo;
@@ -215,11 +240,24 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Replaces ALL open-context segment + unit rows for the trade with the supplied
    * set, then puts the summary row. The supplied summary's segments / units must
    * have their `uuid` fields populated.
+   *
+   * Optional `existsCheck` is invoked BEFORE any write or delete to verify the
+   * underlying trade still exists in `financials.trades`. If it returns false,
+   * throws `OrphanTradeError` and persists nothing. Callers (orchestrator chunk
+   * workers, F1 audit-repair) should catch the error and skip — see (C1) in
+   * the 2026-05-18 orphan-summary investigation arc.
    */
-  async putOpenTradeSummary(summary: TradeYieldSegmentSummary): Promise<void> {
+  async putOpenTradeSummary(
+    summary: TradeYieldSegmentSummary,
+    opts?: {existsCheck?: () => Promise<boolean>},
+  ): Promise<void> {
     const log = this.#log.setMethod('putOpenTradeSummary');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
+      if (opts?.existsCheck) {
+        const exists = await opts.existsCheck();
+        if (!exists) throw new OrphanTradeError(summary.tradeUuid, 'open');
+      }
       await this.deleteOpenTradeRowsByTrade(summary.tradeUuid);
 
       const segmentRows = summary.segments.map(s => this.buildSegmentRow(OPEN_CONTEXT, s));
@@ -306,15 +344,23 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Atomic write of an as-of trade summary AND replacement of its fact rows for
    * the (trade, asOfDate) context. Mirrors `putOpenTradeSummary` but scoped to
    * one (trade, date) pair.
+   *
+   * Optional `existsCheck` mirrors the open-summary guard: throws
+   * `OrphanTradeError` if the trade no longer exists in `financials.trades`,
+   * persisting nothing. Callers should catch and skip.
    */
   async putAsOfTradeSummary(
     summary: AsOfTradeYieldSegmentSummary,
-    audit?: {startedBy?: string; jobId?: string},
+    audit?: {startedBy?: string; jobId?: string; existsCheck?: () => Promise<boolean>},
   ): Promise<void> {
     const log = this.#log.setMethod('putAsOfTradeSummary');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     const context = asOfContext(summary.asOfDate);
     try {
+      if (audit?.existsCheck) {
+        const exists = await audit.existsCheck();
+        if (!exists) throw new OrphanTradeError(summary.tradeUuid, 'as-of');
+      }
       await this.deleteFactRowsByTradeAndContext(summary.tradeUuid, context);
 
       const segmentRows = summary.segments.map(s => this.buildSegmentRow(context, s));
