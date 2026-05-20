@@ -51,10 +51,10 @@
     "@franzzemen/admin-identity": "^0.0.4",
     "@franzzemen/aws-app": "^27.3.44",
     "@franzzemen/endpoint-application": "^10.3.119",
-    "@franzzemen/endpoint-financial-identity": "^7.0.255",
+    "@franzzemen/endpoint-financial-identity": "^7.0.256",
     "@franzzemen/enhanced-error": "^8.1.193",
     "@franzzemen/execution-context": "^16.1.14",
-    "@franzzemen/financial-identity": "^64.8.0",
+    "@franzzemen/financial-identity": "^64.8.1",
     "@franzzemen/logger": "^104.0.29",
     "@franzzemen/utility": "^13.7.5"
   }
