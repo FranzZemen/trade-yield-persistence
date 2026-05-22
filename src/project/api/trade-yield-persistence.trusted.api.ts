@@ -320,6 +320,13 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       await this.#dynamo.batchPut({[OPEN_TRADE_YIELD_SUMMARIES]: [row]});
       log.info(`putOpenTradeSummary: tradeUuid=${summary.tradeUuid} segments=${segmentRows.length} units=${unitRows.length} startedBy=${provenance.startedBy}`);
     } catch (err) {
+      // OrphanTradeError is a control-flow signal (trade deleted out from under
+      // an in-flight reconstitution), not an infrastructure error. It must
+      // survive unwrapped so the caller's isOrphanTradeError() benign-skip guard
+      // fires — logAndEnhanceError would re-wrap it as a plain EnhancedError
+      // (name 'Error'), defeating the guard. Mirrors the PauseRetryError
+      // pass-through convention.
+      if (isOrphanTradeError(err)) throw err;
       throw logAndEnhanceError(log, err as Error);
     }
   }
@@ -481,6 +488,13 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       await this.#dynamo.batchPut({[AS_OF_TRADE_YIELD_SUMMARIES]: [row]});
       log.info(`putAsOfTradeSummary: tradeUuid=${summary.tradeUuid} asOfDate=${summary.asOfDate} segments=${segmentRows.length} units=${unitRows.length} startedBy=${provenance.startedBy}`);
     } catch (err) {
+      // OrphanTradeError is a control-flow signal (trade deleted out from under
+      // an in-flight reconstitution), not an infrastructure error. It must
+      // survive unwrapped so the caller's isOrphanTradeError() benign-skip guard
+      // fires — logAndEnhanceError would re-wrap it as a plain EnhancedError
+      // (name 'Error'), defeating the guard. Mirrors the PauseRetryError
+      // pass-through convention.
+      if (isOrphanTradeError(err)) throw err;
       throw logAndEnhanceError(log, err as Error);
     }
   }

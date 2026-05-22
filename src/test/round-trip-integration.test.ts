@@ -36,6 +36,7 @@ import {awsContextKey} from '@franzzemen/aws-app/context';
 import {
   TradeYieldPersistenceTrustedApi,
   asOfContext,
+  isOrphanTradeError,
   OPEN_CONTEXT,
   sinceContext,
 } from '#project';
@@ -213,6 +214,40 @@ suite('trade-yield-persistence round-trip integration', function () {
     const readOpen = await api.getOpenTradeSummary(tradeUuid1);
     expect(readOpen!.peakSimultaneousCaR).to.equal(1000);
     expect(readOpen!.segments[0]!.uuid).to.equal(openSegments[0]!.uuid);
+  });
+
+  // BUG-001 regression: a failing existsCheck must throw an error that the
+  // caller can still detect with isOrphanTradeError() — i.e. the OrphanTradeError
+  // must survive the method's catch unwrapped, not be re-wrapped by
+  // logAndEnhanceError into a plain EnhancedError (name 'Error').
+  it('orphan guard: putAsOfTradeSummary throws a detectable OrphanTradeError when existsCheck is false', async () => {
+    const asOfDate = '2026-04-21' as Datestamp;
+    const asOfSummary: AsOfTradeYieldSegmentSummary = {
+      ...makeOpenSummary(tradeUuid1, [makeSegment(tradeUuid1, 1_700_000_000_000, null, 500, 25)], []),
+      asOfDate,
+      asOfEpoch: new Date(`${asOfDate}T20:00:00Z`).getTime(),
+      priceCoverage: 1.0,
+    };
+    let thrown: unknown;
+    try {
+      await api.putAsOfTradeSummary(asOfSummary, testProvenance, {existsCheck: async () => false});
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown, 'putAsOfTradeSummary should throw').to.exist;
+    expect(isOrphanTradeError(thrown), 'thrown error must be detectable as OrphanTradeError').to.be.true;
+  });
+
+  it('orphan guard: putOpenTradeSummary throws a detectable OrphanTradeError when existsCheck is false', async () => {
+    const summary = makeOpenSummary(tradeUuid1, [makeSegment(tradeUuid1, 1_700_000_000_000, null, 500, 25)], []);
+    let thrown: unknown;
+    try {
+      await api.putOpenTradeSummary(summary, testProvenance, {existsCheck: async () => false});
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown, 'putOpenTradeSummary should throw').to.exist;
+    expect(isOrphanTradeError(thrown), 'thrown error must be detectable as OrphanTradeError').to.be.true;
   });
 
   it('since: puts and reads back with anchor-epoch keying', async () => {
