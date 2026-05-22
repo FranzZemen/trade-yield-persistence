@@ -49,12 +49,12 @@
   },
   "dependencies": {
     "@franzzemen/admin-identity": "^0.0.6",
-    "@franzzemen/aws-app": "^27.3.49",
-    "@franzzemen/endpoint-application": "^10.3.125",
-    "@franzzemen/endpoint-financial-identity": "^7.0.265",
+    "@franzzemen/aws-app": "^27.3.50",
+    "@franzzemen/endpoint-application": "^10.3.126",
+    "@franzzemen/endpoint-financial-identity": "^7.0.266",
     "@franzzemen/enhanced-error": "^8.1.195",
     "@franzzemen/execution-context": "^16.1.16",
-    "@franzzemen/financial-identity": "^64.8.5",
+    "@franzzemen/financial-identity": "^64.8.6",
     "@franzzemen/logger": "^104.0.31",
     "@franzzemen/utility": "^13.7.7"
   }
