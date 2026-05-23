@@ -20,11 +20,11 @@
     "@aws-sdk/client-dynamodb": "^3.1053.0",
     "@aws-sdk/credential-providers": "^3.1053.0",
     "@aws-sdk/lib-dynamodb": "^3.1053.0",
-    "@franzzemen/build-system": "^27.1.0",
-    "@franzzemen/execution-context-node-loader": "^2.0.23",
-    "@franzzemen/node-loggers": "^1.0.97",
-    "@franzzemen/npmu": "^12.5.12",
-    "@franzzemen/safe-config": "^5.1.22",
+    "@franzzemen/build-system": "^28.0.0",
+    "@franzzemen/execution-context-node-loader": "^2.0.24",
+    "@franzzemen/node-loggers": "^1.0.98",
+    "@franzzemen/npmu": "^12.5.13",
+    "@franzzemen/safe-config": "^5.1.23",
     "@inquirer/prompts": "^8.4.3",
     "@smithy/node-http-handler": "^4.7.4",
     "@types/chai": "^5.2.3",
@@ -48,14 +48,14 @@
     }
   },
   "dependencies": {
-    "@franzzemen/admin-identity": "^0.0.6",
-    "@franzzemen/aws-app": "^27.3.53",
-    "@franzzemen/endpoint-application": "^10.3.130",
-    "@franzzemen/endpoint-financial-identity": "^7.0.270",
-    "@franzzemen/enhanced-error": "^8.1.195",
-    "@franzzemen/execution-context": "^16.1.16",
-    "@franzzemen/financial-identity": "^64.8.6",
-    "@franzzemen/logger": "^104.0.31",
-    "@franzzemen/utility": "^13.7.7"
+    "@franzzemen/admin-identity": "^0.0.7",
+    "@franzzemen/aws-app": "^27.3.54",
+    "@franzzemen/endpoint-application": "^10.3.131",
+    "@franzzemen/endpoint-financial-identity": "^7.0.271",
+    "@franzzemen/enhanced-error": "^8.1.196",
+    "@franzzemen/execution-context": "^16.1.17",
+    "@franzzemen/financial-identity": "^64.8.7",
+    "@franzzemen/logger": "^104.0.32",
+    "@franzzemen/utility": "^13.7.8"
   }
 }

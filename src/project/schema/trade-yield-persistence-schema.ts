@@ -181,6 +181,14 @@ const tradeYieldPersistenceSchema: SchemaSequence = {
   updates: []
 };
 
+/**
+ * @iam dynamodb:CreateTable
+ * @iam dynamodb:DeleteTable
+ * @iam dynamodb:DescribeTable
+ * @iam dynamodb:UpdateTable
+ * @iam dynamodb:UpdateTimeToLive
+ */
+
 export async function updateTradeYieldPersistenceSchema(ec: ExecutionContext, callback?: ProgressCallback): Promise<void> {
   const dynamo = new Dynamo(ec, 'dynamodb-admin');
   await dynamo.updateSchema(merge({} as SchemaSequence, tradeYieldPersistenceSchema), callback);
