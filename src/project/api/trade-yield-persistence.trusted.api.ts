@@ -224,7 +224,7 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * hydration on read. Single LSI Query with `${tradeUuid}#${context}#` prefix.
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
    */
   async getSegmentRowsForTradeAndContext(tradeUuid: TradeUUID, context: YieldContext): Promise<_TradeYieldSegment[]> {
     const log = this.#log.setMethod('getSegmentRowsForTradeAndContext');
@@ -248,7 +248,7 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Return every sub-trade-yield-unit fact row for one (trade, context).
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    */
   async getSubTradeYieldUnitRowsForTradeAndContext(tradeUuid: TradeUUID, context: YieldContext): Promise<_SubTradeYieldUnit[]> {
     const log = this.#log.setMethod('getSubTradeYieldUnitRowsForTradeAndContext');
@@ -283,9 +283,9 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * the 2026-05-18 orphan-summary investigation arc.
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
    * - `dynamodb:GetItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
@@ -363,8 +363,8 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    *
    * **IAM (transitive):**
    * - `dynamodb:GetItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    */
   async getOpenTradeSummary(tradeUuid: TradeUUID): Promise<TradeYieldSegmentSummary | undefined> {
     const log = this.#log.setMethod('getOpenTradeSummary');
@@ -471,9 +471,9 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * persisting nothing. Callers should catch and skip.
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.as-of-trade-yield-summaries` (+ test mirror)
    * - TODO: union `existsCheck` callback IAM at the orchestrator call site (typically `TradesTrustedApi.getThinTrade` on `financials.trades`)
@@ -553,8 +553,8 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    *
    * **IAM (transitive):**
    * - `dynamodb:GetItem` on `financials.trade-yield-persistence.as-of-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    */
   async getAsOfTradeSummary(tradeUuid: TradeUUID, asOfDate: Datestamp): Promise<AsOfTradeYieldSegmentSummary | undefined> {
     const log = this.#log.setMethod('getAsOfTradeSummary');
@@ -580,7 +580,7 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Every as-of summary row for one trade across dates (no segment hydration).
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries/index/byTrade-index` (+ test mirror)
    */
   async getAsOfTradeSummaryRowsForTrade(tradeUuid: TradeUUID, range?: DateRange): Promise<_AsOfTradeYieldSummary[]> {
     const log = this.#log.setMethod('getAsOfTradeSummaryRowsForTrade');
@@ -624,9 +624,9 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * the (trade, sinceAnchorEpoch) context.
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.since-trade-yield-summaries` (+ test mirror)
    */
@@ -691,8 +691,8 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    *
    * **IAM (transitive):**
    * - `dynamodb:GetItem` on `financials.trade-yield-persistence.since-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    */
   async getSinceTradeSummary(tradeUuid: TradeUUID, sinceAnchorEpoch: number): Promise<SinceTradeYieldSegmentSummary | undefined> {
     const log = this.#log.setMethod('getSinceTradeSummary');
@@ -718,7 +718,7 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Every since-summary row for one trade across anchors (no segment hydration).
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.since-trade-yield-summaries/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.since-trade-yield-summaries/index/byTrade-index` (+ test mirror)
    */
   async getSinceTradeSummaryRowsForTrade(tradeUuid: TradeUUID): Promise<_SinceTradeYieldSummary[]> {
     const log = this.#log.setMethod('getSinceTradeSummaryRowsForTrade');
@@ -850,15 +850,15 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * coupling this package to gain-snapshots at the dependency level.
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
    * - `dynamodb:GetItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.as-of-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.since-trade-yield-summaries/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.since-trade-yield-summaries/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.since-trade-yield-summaries` (+ test mirror)
    * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-daily-mtm-series` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-daily-mtm-series` (+ test mirror)
@@ -927,9 +927,9 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * NOT touch summary rows.
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
    */
   async deleteFactRowsByTradeAndContext(tradeUuid: TradeUUID, context: YieldContext): Promise<number> {
@@ -963,9 +963,9 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Delete the open-context fact rows + summary row for one trade.
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
    * - `dynamodb:GetItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
@@ -994,11 +994,11 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Idempotent.
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.as-of-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
    */
   async deleteAsOfSummariesByTradeAndDateRange(tradeUuid: TradeUUID, fromDate: Datestamp): Promise<number> {
@@ -1026,11 +1026,11 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Idempotent.
    *
    * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.since-trade-yield-summaries/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.since-trade-yield-summaries/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.since-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/*/index/byTrade-index` (+ test mirror)
+   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
    * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
    */
   async deleteSinceSummariesByTradeAndAnchorRange(tradeUuid: TradeUUID, fromEpoch: number): Promise<number> {
