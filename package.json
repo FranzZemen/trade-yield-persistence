@@ -1,6 +1,6 @@
 {
   "name": "@franzzemen/trade-yield-persistence",
-  "version": "1.1.36",
+  "version": "1.1.37",
   "description": "Persistence layer for trade-level yield segments (TradeYieldSegment, SubTradeYieldUnit, open/as-of/since trade-yield summaries, daily-MTM series). DDB schema, key encoders, and trusted I/O APIs consumed by brokenstock-orchestrator.",
   "homepage": "https://github.com/FranzZemen/trade-yield-persistence#readme",
   "bugs": {
