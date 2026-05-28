@@ -22,8 +22,8 @@
     "@aws-sdk/lib-dynamodb": "^3.1055.0",
     "@franzzemen/build-system": "^32.1.0",
     "@franzzemen/execution-context-node-loader": "^2.0.30",
-    "@franzzemen/node-loggers": "^1.0.105",
-    "@franzzemen/npmu": "^12.5.20",
+    "@franzzemen/node-loggers": "^1.0.106",
+    "@franzzemen/npmu": "^12.5.21",
     "@franzzemen/safe-config": "^5.1.30",
     "@inquirer/prompts": "^8.5.0",
     "@smithy/node-http-handler": "^4.7.5",
@@ -49,13 +49,13 @@
   },
   "dependencies": {
     "@franzzemen/admin-identity": "^0.0.13",
-    "@franzzemen/aws-app": "^28.0.8",
-    "@franzzemen/endpoint-application": "^10.3.144",
-    "@franzzemen/endpoint-financial-identity": "^7.0.297",
-    "@franzzemen/enhanced-error": "^8.1.204",
+    "@franzzemen/aws-app": "^28.1.1",
+    "@franzzemen/endpoint-application": "^10.3.145",
+    "@franzzemen/endpoint-financial-identity": "^7.0.298",
+    "@franzzemen/enhanced-error": "^8.1.205",
     "@franzzemen/execution-context": "^16.1.23",
-    "@franzzemen/financial-identity": "^65.1.5",
-    "@franzzemen/logger": "^104.0.39",
+    "@franzzemen/financial-identity": "^65.1.6",
+    "@franzzemen/logger": "^104.0.40",
     "@franzzemen/utility": "^13.7.14"
   }
 }
