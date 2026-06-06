@@ -33,6 +33,8 @@ import {Datestamp} from '@franzzemen/utility';
 import {LoadExecutionConfigsFunctionInputs, loadNodeExecutionContext} from '@franzzemen/execution-context-node-loader';
 import {LoggerApi} from '@franzzemen/logger';
 import {awsContextKey} from '@franzzemen/aws-app/context';
+import type {Kysely} from 'kysely';
+import type {Database} from '@franzzemen/brokenstock-postgres-ddl/schema-types';
 import {
   TradeYieldPersistenceTrustedApi,
   asOfContext,
@@ -149,7 +151,8 @@ suite('trade-yield-persistence round-trip integration', function () {
       ttl: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
       roles: [],
     });
-    api = new TradeYieldPersistenceTrustedApi(ec);
+    // TODO C7: inject db
+    api = new TradeYieldPersistenceTrustedApi(ec, undefined as unknown as Kysely<Database>);
     await api.deleteByTrade(tradeUuid1);
     await api.deleteByTrade(tradeUuid2);
   });

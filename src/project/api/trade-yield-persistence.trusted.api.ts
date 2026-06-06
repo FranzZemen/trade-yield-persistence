@@ -21,6 +21,8 @@ import {
 } from '@franzzemen/financial-identity';
 import {LoggerApi} from '@franzzemen/logger';
 import {Datestamp} from '@franzzemen/utility';
+import type {Kysely} from 'kysely';
+import type {Database} from '@franzzemen/brokenstock-postgres-ddl/schema-types';
 
 import {
   AS_OF_TRADE_YIELD_SUMMARIES,
@@ -122,8 +124,8 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   #log: LoggerApi;
   #dynamo: Dynamo;
 
-  constructor(ec: ExecutionContext) {
-    super(ec);
+  constructor(ec: ExecutionContext, db: Kysely<Database>) {
+    super(ec, db);
     this.#log = new LoggerApi(ec, 'trade-yield-persistence', 'trade-yield-persistence.trusted.api', TradeYieldPersistenceTrustedApi.name);
     this.#dynamo = new Dynamo(ec, 'dynamodb-user');
   }
