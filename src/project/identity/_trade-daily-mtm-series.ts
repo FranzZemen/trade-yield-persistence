@@ -8,7 +8,11 @@ import {DBRecord} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {Archetype, TradeUUID} from '@franzzemen/financial-identity';
 import {Datestamp} from '@franzzemen/utility';
-import {padEpoch} from './yield-context.js';
+import type {Selectable} from 'kysely';
+import type {
+  TradeDailyMtmSeriesTable,
+  TradeDailyMtmArchetypeContributionsTable,
+} from '@franzzemen/brokenstock-postgres-ddl/schema-types';
 
 /**
  * One day's archetype contribution to a trade's mark-to-market exposure.
@@ -20,28 +24,17 @@ export type SegmentArchetypeContribution = {
 };
 
 /**
- * Persisted daily MTM fact for one (owner, tradeUuid, dateEpoch). Populated lazily
- * by `lambda-trade-daily-mtm-populator` (yield-segment-redesign PRD E11.5) on first
- * chart view of a trade, and tail-extended nightly for active trades.
+ * In-memory daily MTM fact for one (owner, trade_id, date_epoch). Populated lazily
+ * by the daily-mtm populator (yield-segment-redesign PRD E11.5).
  *
- * SK strategy:
- * - Base RANGE = `tradeDateSk = '${tradeUuid}#${padEpoch(dateEpoch)}'`.
- *   "All daily MTM rows for one trade" = prefix scan `'${tradeUuid}#'`.
- *
- * No LSI is required — every read path is per-trade (chart panel) or per-owner
- * scan (the emergent "watchlist" used by the nightly tail-extender is just a
- * distinct-tradeUuid pass over the base table).
- *
- * Cascade contract:
- * - Trade uuid rotation / trade deletion → cascade-delete by base-SK prefix
- *   `'${tradeUuid}#'`.
- * - Yield-math invalidation → wipe affected `tradeUuid` prefix; populator
- *   repopulates on next view.
+ * In Postgres (Era 4 / 4a) this is the `trade_daily_mtm_series` row plus its child
+ * `trade_daily_mtm_archetype_contributions` rows (the bounded
+ * `segmentArchetypeContributions[]`). The DDB `tradeDateSk` encoding is gone — reads
+ * are by (owner, trade_id) ordered by date.
  */
 export type _TradeDailyMTMSeries = DBRecord & {
   owner: AccountOwner;
   tradeUuid: TradeUUID;
-  tradeDateSk: string;
 
   /** Midnight-UTC epoch of the trading date this row represents. */
   dateEpoch: number;
@@ -65,7 +58,33 @@ export type _TradeDailyMTMSeries = DBRecord & {
 } & Partial<Provenance>;
 // Provenance fields optional on row for read-tolerance; required on put-method parameter.
 // See persistence-row-provenance.prd.md.
+// NOTE: the trade_daily_mtm_series table has NO provenance columns; provenance is
+// accepted on the put method (parity with the other put methods) but not persisted.
 
-export function makeTradeDateSk(tradeUuid: TradeUUID, dateEpoch: number): string {
-  return `${tradeUuid}#${padEpoch(dateEpoch)}`;
+/**
+ * Row shape from a SELECT against `trade_daily_mtm_series` where `date` is projected
+ * with `::text` so it materializes as a 'YYYY-MM-DD' string (DATE off-by-one convention).
+ */
+export type DailyMtmRow = Omit<Selectable<TradeDailyMtmSeriesTable>, 'date'> & {date: string};
+type ContributionRow = Selectable<TradeDailyMtmArchetypeContributionsTable>;
+
+/**
+ * Map a PG `trade_daily_mtm_series` row + its child archetype-contribution rows back
+ * into a `_TradeDailyMTMSeries` (NUMERIC/BIGINT → Number() at the boundary).
+ */
+export function dailyMtmRowToRecord(row: DailyMtmRow, contributions: ContributionRow[]): _TradeDailyMTMSeries {
+  return {
+    owner: row.owner as AccountOwner,
+    tradeUuid: row.trade_id as TradeUUID,
+    dateEpoch: Number(row.date_epoch),
+    date: row.date as Datestamp,
+    mtmAmount: Number(row.mtm_amount),
+    carAtDate: Number(row.car_at_date),
+    segmentArchetypeContributions: contributions.map(c => ({
+      archetype: c.archetype as Archetype,
+      carContribution: Number(c.car_contribution),
+    })),
+    priceCoverage: Number(row.price_coverage),
+    computedAt: Number(row.computed_at),
+  };
 }

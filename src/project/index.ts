@@ -1,4 +1,3 @@
-export * from './schema/trade-yield-persistence-schema.js';
 export * from './identity/yield-context.js';
 export * from './identity/_trade-yield-segment.js';
 export * from './identity/_sub-trade-yield-unit.js';

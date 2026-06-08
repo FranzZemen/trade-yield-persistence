@@ -1,32 +1,45 @@
 # Usage: trade-yield-persistence
 
-`TradeYieldPersistenceTrustedApi` is a trusted (server-side) API. Construct it with an `ExecutionContext` that carries a synthetic session owner; every method scopes I/O to that owner.
+`TradeYieldPersistenceTrustedApi` is a trusted (server-side) API over Aurora
+Postgres (kysely). Construct it with an `ExecutionContext` carrying a synthetic
+session owner AND the `Kysely<Database>` instance; every method scopes I/O to
+that owner via `getSessionOwner(ec)`.
 
 ```typescript
+import {Kysely} from 'kysely';
 import {ExecutionContext} from '@franzzemen/execution-context';
+import type {Database} from '@franzzemen/brokenstock-postgres-ddl/schema-types';
 import {TradeYieldPersistenceTrustedApi} from '@franzzemen/trade-yield-persistence';
 
-const api = new TradeYieldPersistenceTrustedApi(ec);
+const api = new TradeYieldPersistenceTrustedApi(ec, db); // db: Kysely<Database>
 ```
+
+Every `put*` requires a `Provenance` argument; it is stamped onto each written
+row (`putDailyMTMRows` accepts it for parity but the daily-MTM table has no
+provenance columns).
 
 ## Fact-row writes
 
 ```typescript
-// Segments (one row per evaluated segment, under the supplied context).
-await api.putSegmentRows([
-  {owner, context: 'open', tradeUuid, contextTradeStartSk: '…', tradeContextStartSk: '…', segment}
-]);
+// Segments — one row per evaluated segment, under the supplied context.
+// Each segment.uuid (the PK) and context must be populated; buildSegmentRow does this.
+const segRows = segments.map(s => api.buildSegmentRow('open', s));
+await api.putSegmentRows(segRows, provenance);
 
 // Sub-trade yield units (per-symbol forensic view).
-await api.putSubTradeYieldUnitRows([...]);
+const unitRows = units.map(u => api.buildSubTradeYieldUnitRow('open', u));
+await api.putSubTradeYieldUnitRows(unitRows, provenance);
 ```
 
-Both methods are idempotent batch upserts. Build the SK fields via the encoders in `identity/_trade-yield-segment.ts` and `identity/_sub-trade-yield-unit.ts`.
+`putSegmentRows` writes the segment's scalar columns AND its `transactionPortions[]`
+into the child `trade_yield_segment_transaction_portions` table. Both methods are
+batch upserts.
 
 ## Fact-row reads
 
 ```typescript
-// All segments for a (trade, context) — driven by the byTrade-index LSI.
+// All segments for a (trade, context) — WHERE (owner, trade_id, context).
+// Reassembles each segment's transactionPortions[] from the child table.
 const segments = await api.getSegmentRowsForTradeAndContext(tradeUuid, 'open');
 
 // All sub-trade yield units for a (trade, context).
@@ -35,18 +48,25 @@ const units = await api.getSubTradeYieldUnitRowsForTradeAndContext(tradeUuid, 'a
 
 ## Summary writes
 
+Each summary write is atomic: it replaces the context's fact rows (segments +
+units) then upserts the summary row.
+
 ```typescript
-// Open trade summary — one row per (owner, tradeUuid).
-await api.putOpenTradeSummary(summary);                              // TradeYieldSegmentSummary
+// Open trade summary — one row per (owner, trade_id).
+await api.putOpenTradeSummary(summary, provenance);                        // TradeYieldSegmentSummary
+await api.putOpenTradeSummary(summary, provenance, {existsCheck});         // skip if trade gone (OrphanTradeError)
 
-// As-of summary — one row per (owner, asOfDate, tradeUuid).
-await api.putAsOfTradeSummary(summary, asOfDate);                    // AsOfTradeYieldSegmentSummary
+// As-of summary — one row per (owner, trade_id, as_of_date).
+await api.putAsOfTradeSummary(summary, provenance);                        // AsOfTradeYieldSegmentSummary
+await api.putAsOfTradeSummary(summary, provenance, {existsCheck});
 
-// Since summary — one row per (owner, sinceAnchorEpoch, tradeUuid).
-await api.putSinceTradeSummary(summary, sinceAnchorEpoch);
+// Since summary — one row per (owner, trade_id, since_anchor_epoch).
+await api.putSinceTradeSummary(summary, provenance);
 ```
 
-`priceCoverage` + `recomputeAttempts` are persisted on `_OpenTradeYieldSummary` and hydrated on read (E11.7).
+`existsCheck` (open + as-of only) runs before any write; if it returns false the
+call throws `OrphanTradeError` and persists nothing — catch it with
+`isOrphanTradeError(err)` and treat as a benign skip.
 
 ## Summary reads
 
@@ -54,35 +74,53 @@ await api.putSinceTradeSummary(summary, sinceAnchorEpoch);
 const open    = await api.getOpenTradeSummary(tradeUuid);                     // TradeYieldSegmentSummary | undefined
 const asOf    = await api.getAsOfTradeSummary(tradeUuid, '2026-04-15');       // AsOfTradeYieldSegmentSummary | undefined
 const since   = await api.getSinceTradeSummary(tradeUuid, anchorEpoch);
-const allOpen = await api.getAllOpenTradeSummaryRows();                       // every open trade for owner (nightly rollup)
+const allOpen = await api.getAllOpenTradeSummaryRows();                       // every open-trade summary row for owner (no hydration)
 
-// Time-series fan-out
+// Time-series fan-out (summary rows only, no segment hydration)
 const asOfHistory = await api.getAsOfTradeSummaryRowsForTrade(tradeUuid, {from: '2026-01-01'});
-const dailyByDate = await api.getAsOfTradeSummaryRowsForOwnerAndDate('2026-04-15');
+const dailyByDate = await api.getAsOfTradeSummaryRowsForOwnerAndDate('2026-04-15'); // uses the (owner, as_of_date) index
+```
+
+The composite reads (`getOpenTradeSummary` / `getAsOfTradeSummary` /
+`getSinceTradeSummary`) hydrate the summary row + its segments + units into the
+public DTO. The `…RowsFor…` reads return summary scalar rows only.
+
+## Admin / provenance helpers
+
+```typescript
+const stale  = await api.findStaleOpenTradeSummaries(cutoffEpoch);            // writtenAt < cutoff or missing
+const groups = await api.groupOpenSummariesByProvenance('writerLambda');      // | 'startedBy' | 'writerVersion'
 ```
 
 ## Daily MTM series (E11.5)
 
 ```typescript
-// Write — populator emits one row per trading day.
-await api.putDailyMTMRows([...]);
+// Write — one row per trading day; also replaces the row's archetype-contribution children.
+await api.putDailyMTMRows(rows, provenance);
 
-// Read — chart consumes the full curve for one trade.
+// Read — full curve for one trade, ascending by date (children reassembled).
 const series = await api.queryDailyMTMSeriesForTrade(tradeUuid);
 
 // Watchlist for nightly tail-extender.
 const tradeUuids = await api.getDistinctTradeUuidsWithDailyMTM();
 
-// Wipe (invalidation pipeline; lazy repopulate on next view).
+// Wipe (invalidation; lazy repopulate on next view). Children cascade via FK.
 const deleted = await api.deleteDailyMTMSeriesForTrade(tradeUuid);
 ```
 
 ## Cascade delete
 
+A trade row deleted in `financials.trades` auto-sweeps every yield row via FK
+`ON DELETE CASCADE`. For *invalidation* (clearing derived rows without deleting
+the trade), use the explicit sweep:
+
 ```typescript
-// Single call sweeps every row across all six tables for the trade.
+// Single call deletes every persistence-layer row across all tables for the trade
+// (segments, units, all three summaries, daily-MTM; children cascade via FK).
 // Callers MUST use this — do not call per-table delete methods directly.
-const deleted = await api.deleteByTrade(tradeUuid);
+const {deleted, asOfDatesTouched} = await api.deleteByTrade(tradeUuid);
+// Chain the gain-snapshots cascade for the touched dates:
+//   await gainSnapshotsApi.deleteAsOfRowsForDates(asOfDatesTouched);
 ```
 
 Wired into:
@@ -95,18 +133,25 @@ Wired into:
 These exist for in-place invalidation flows. Most callers should prefer `deleteByTrade`.
 
 ```typescript
-await api.deleteFactRowsByTradeAndContext(tradeUuid, 'asOf:2026-04-15');
-await api.deleteOpenTradeRowsByTrade(tradeUuid);
-await api.deleteAsOfSummariesByTradeAndDateRange(tradeUuid, '2026-04-01');
-await api.deleteSinceSummariesByTradeAndAnchorRange(tradeUuid, fromEpoch);
+await api.deleteFactRowsByTradeAndContext(tradeUuid, 'asOf:2026-04-15');   // segments + units for one context
+await api.deleteOpenTradeRowsByTrade(tradeUuid);                          // open facts + open summary
+await api.deleteAsOfSummariesByTradeAndDateRange(tradeUuid, '2026-04-01'); // as-of summaries + facts, asOfDate >= from
+await api.deleteSinceSummariesByTradeAndAnchorRange(tradeUuid, fromEpoch); // since summaries + facts, anchor >= from
 ```
+
+Each returns the number of rows deleted (segment portion + archetype-contribution
+children cascade via their own FKs).
 
 ## Type re-exports
 
-The package re-exports `Archetype`, `SegmentBoundaryKind`, `TradeYieldSegment`, `TradeYieldSegmentSummary`, etc. from `@franzzemen/financial-identity` for caller convenience. The authoritative source is still `financial-identity`.
+The package re-exports `OPEN_CONTEXT`, `asOfContext`, `sinceContext`, and
+`padEpoch`. Public wire shapes (`TradeYieldSegment`, `TradeYieldSegmentSummary`,
+`Archetype`, `SegmentBoundaryKind`, `SubTradeYieldUnit`, etc.) come from
+`@franzzemen/financial-identity` — the authoritative source.
 
 ## See also
 
 - [Daily MTM Series usage](./trade-daily-mtm-series.usage.md)
 - [Intent](../intent/trade-yield-persistence.intent.md)
 - [Guide](../guide/trade-yield-persistence.guide.md)
+</content>

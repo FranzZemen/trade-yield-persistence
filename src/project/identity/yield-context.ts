@@ -7,16 +7,15 @@ import {Datestamp} from '@franzzemen/utility';
 
 /**
  * Discriminator that scopes a segment / sub-trade-yield-unit row to one of the three
- * trade-yield summary contexts. Encoded as a string prefix in the row's SK so a single
- * Query prefix-scan returns "all rows in this context for owner" (or "for trade in
- * context" via the by-trade LSI).
+ * trade-yield summary contexts. In Postgres this is a plain `context TEXT` column on the
+ * fact + (implicitly) the summary tables; a fact read is `WHERE (owner, trade_id, context)`.
  *
  * - `'open'` — rolling computation against current open trade state. One canonical
  *   set of segments per trade.
  * - `'asOf:YYYY-MM-DD'` — reconstitution at a historical date. Multiple sets per trade,
  *   keyed by as-of date.
  * - `'since:<epoch13>'` — gain-since-anchor reconstitution. Multiple sets per trade,
- *   keyed by the anchor epoch (zero-padded to 13 digits for lexicographic sort).
+ *   keyed by the anchor epoch (zero-padded to 13 digits for stable lexicographic sort).
  */
 export type YieldContext =
   | 'open'

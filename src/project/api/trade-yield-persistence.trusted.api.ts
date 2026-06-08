@@ -4,7 +4,6 @@ License Type: UNLICENSED
 */
 
 import {Provenance} from '@franzzemen/admin-identity';
-import {Dynamo, KeyStructuredExpression} from '@franzzemen/aws-app/dynamo';
 import {EndpointApplicationsApi, getSessionOwner} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {logAndEnhanceError} from '@franzzemen/enhanced-error';
@@ -13,40 +12,29 @@ import {
   AsOfTradeYieldSegmentSummary,
   SinceTradeYieldSegmentSummary,
   SubTradeYieldUnit,
-  SubTradeYieldUnitUUID,
   TradeUUID,
   TradeYieldSegment,
   TradeYieldSegmentSummary,
-  TradeYieldSegmentUUID,
 } from '@franzzemen/financial-identity';
 import {LoggerApi} from '@franzzemen/logger';
 import {Datestamp} from '@franzzemen/utility';
-import type {Kysely} from 'kysely';
-import type {Database} from '@franzzemen/brokenstock-postgres-ddl/schema-types';
+import {Kysely, sql} from 'kysely';
+import type {Selectable} from 'kysely';
+import type {Database, OpenTradeYieldSummariesTable} from '@franzzemen/brokenstock-postgres-ddl/schema-types';
 
 import {
-  AS_OF_TRADE_YIELD_SUMMARIES,
-  BY_TRADE_INDEX,
-  OPEN_TRADE_YIELD_SUMMARIES,
-  SINCE_TRADE_YIELD_SUMMARIES,
-  SUB_TRADE_YIELD_UNITS,
-  TRADE_DAILY_MTM_SERIES,
-  TRADE_YIELD_SEGMENTS,
-} from '../schema/trade-yield-persistence-schema.js';
-import {
   _TradeDailyMTMSeries,
-  makeTradeDateSk,
+  dailyMtmRowToRecord,
+  DailyMtmRow,
 } from '../identity/_trade-daily-mtm-series.js';
 import {
   _SubTradeYieldUnit,
-  makeContextTradeSubTradeUnitSk,
-  makeTradeContextSubTradeUnitSk,
   toSubTradeYieldUnit,
+  unitRowToRecord,
 } from '../identity/_sub-trade-yield-unit.js';
 import {
   _TradeYieldSegment,
-  makeContextTradeStartSk,
-  makeTradeContextStartSk,
+  segmentRowToRecord,
   toTradeYieldSegment,
 } from '../identity/_trade-yield-segment.js';
 import {
@@ -55,14 +43,14 @@ import {
 } from '../identity/_open-trade-yield-summary.js';
 import {
   _AsOfTradeYieldSummary,
-  makeAsOfDateTradeUuidSk,
-  makeTradeUuidAsOfDateSk,
+  asOfSummaryRowToRecord,
+  AsOfSummaryRow,
   toAsOfTradeYieldSummary,
 } from '../identity/_as-of-trade-yield-summary.js';
 import {
   _SinceTradeYieldSummary,
-  makeSinceAnchorTradeUuidSk,
-  makeTradeUuidSinceAnchorSk,
+  sinceSummaryRowToRecord,
+  SinceSummaryRow,
   toSinceTradeYieldSummary,
 } from '../identity/_since-trade-yield-summary.js';
 import {
@@ -81,7 +69,7 @@ export type DateRange = {
 
 /**
  * Trusted (session-owner-derived, capability-bypassing) read/write API for the
- * five trade-yield-segment persistence tables (yield-segment-redesign PRD E8).
+ * trade-yield persistence tables. Repointed to kysely/Postgres (Era 4 / 4a).
  *
  * Owner is derived from the execution context via `getSessionOwner(ec)`. Callers
  * must set the synthetic session to the target owner before invoking these
@@ -122,47 +110,78 @@ export function isOrphanTradeError(err: unknown): err is OrphanTradeError {
 
 export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   #log: LoggerApi;
-  #dynamo: Dynamo;
+  #db: Kysely<Database>;
 
   constructor(ec: ExecutionContext, db: Kysely<Database>) {
     super(ec, db);
     this.#log = new LoggerApi(ec, 'trade-yield-persistence', 'trade-yield-persistence.trusted.api', TradeYieldPersistenceTrustedApi.name);
-    this.#dynamo = new Dynamo(ec, 'dynamodb-user');
+    this.#db = db;
   }
 
   // ── Fact-row writes ─────────────────────────────────────────────────────────
 
   /**
-   * Spread Provenance fields onto each row in place. Used by every public put
-   * method before invoking batchPut, so every row in every table carries a
-   * uniform write-time stamp (persistence-row-provenance.prd.md D1).
-   */
-  #stampRows<T extends Partial<Provenance>>(rows: T[], provenance: Provenance): void {
-    for (const r of rows) {
-      r.startedBy     = provenance.startedBy;
-      r.jobId         = provenance.jobId;
-      r.writerLambda  = provenance.writerLambda;
-      r.writerVersion = provenance.writerVersion;
-      r.writtenAt     = provenance.writtenAt;
-    }
-  }
-
-  /**
-   * Batch-put per-segment fact rows. Caller is responsible for populating the
-   * row's `contextTradeStartSk` and `tradeContextStartSk` via the helpers
-   * exposed here (`buildSegmentRow`). Provenance is stamped onto every row
-   * before write (persistence-row-provenance.prd.md D1).
+   * Batch-put per-segment fact rows. Inserts each `_TradeYieldSegment` into
+   * `trade_yield_segments` (its scalar columns) AND its `transactionPortions[]`
+   * into the child `trade_yield_segment_transaction_portions` table. Provenance is
+   * stamped onto every row (persistence-row-provenance.prd.md D1).
    *
-   * **IAM (transitive):**
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on TRADE_YIELD_SEGMENTS
+   * Each row's `segment.uuid` (the PK `segment_id`) and `context` must be populated
+   * by the caller (`buildSegmentRow` does this).
    */
   async putSegmentRows(rows: _TradeYieldSegment[], provenance: Provenance): Promise<void> {
     const log = this.#log.setMethod('putSegmentRows');
     if (rows.length === 0) return;
+    const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      this.#stampRows(rows, provenance);
-      await this.#dynamo.batchPut({[TRADE_YIELD_SEGMENTS]: rows});
+      for (const r of rows) {
+        const s = r.segment;
+        if (!s.uuid) throw new Error('putSegmentRows: segment.uuid is required');
+        await this.#db.insertInto('trade_yield_segments').values({
+          segment_id: s.uuid,
+          owner,
+          trade_id: r.tradeUuid,
+          context: r.context,
+          sub_trade_uuids: s.subTradeUuids,
+          archetype: s.archetype,
+          denominator: s.denominator as unknown as string,
+          start_epoch: s.startEpoch as unknown as string,
+          end_epoch: (s.endEpoch === null ? null : s.endEpoch) as unknown as string | null,
+          start_boundary_kind: s.startBoundaryKind,
+          end_boundary_kind: s.endBoundaryKind ?? null,
+          gain: s.gain as unknown as string,
+          mtm_price_at_boundary: (s.markToMarketPriceAtBoundary ?? null) as unknown as string | null,
+          days: s.days,
+          yield: s.yield as unknown as string,
+          fees_and_commissions: s.feesAndCommissions as unknown as string,
+          explanation: s.explanation ?? null,
+          leaf_chain_uuids: s.leafChainUuids ?? null,
+          prior_segment_uuids: s.priorSegmentUuids ?? null,
+          closing_transaction_uuids: s.closingTransactionUuids ?? null,
+          opening_transaction_uuids: s.openingTransactionUuids ?? null,
+          family_cluster_id: s.familyClusterId ?? null,
+          boundary_qty_delta_prior: (s.boundaryQuantityDelta?.prior ?? null) as unknown as string | null,
+          boundary_qty_delta_current: (s.boundaryQuantityDelta?.current ?? null) as unknown as string | null,
+          started_by: provenance.startedBy,
+          job_id: provenance.jobId,
+          writer: provenance.writerLambda,
+          writer_version: provenance.writerVersion,
+          written_at: provenance.writtenAt as unknown as string,
+          created_by: owner,
+          updated_by: owner,
+        }).execute();
+
+        if (s.transactionPortions.length > 0) {
+          await this.#db.insertInto('trade_yield_segment_transaction_portions').values(
+            s.transactionPortions.map(p => ({
+              segment_id: s.uuid!,
+              transaction_id: p.transactionUuid,
+              portion: p.quantityPortion as unknown as string,
+              created_by: owner,
+            })),
+          ).execute();
+        }
+      }
       log.info(`putSegmentRows: wrote ${rows.length} rows`);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
@@ -170,18 +189,43 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   }
 
   /**
-   * Batch-put per-sub-trade-yield-unit fact rows. Provenance-stamped per D1.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on SUB_TRADE_YIELD_UNITS
+   * Batch-put per-sub-trade-yield-unit fact rows into `sub_trade_yield_units`.
+   * Provenance-stamped per D1.
    */
   async putSubTradeYieldUnitRows(rows: _SubTradeYieldUnit[], provenance: Provenance): Promise<void> {
     const log = this.#log.setMethod('putSubTradeYieldUnitRows');
     if (rows.length === 0) return;
+    const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      this.#stampRows(rows, provenance);
-      await this.#dynamo.batchPut({[SUB_TRADE_YIELD_UNITS]: rows});
+      for (const r of rows) {
+        const u = r.unit;
+        if (!u.uuid) throw new Error('putSubTradeYieldUnitRows: unit.uuid is required');
+        await this.#db.insertInto('sub_trade_yield_units').values({
+          unit_id: u.uuid,
+          owner,
+          trade_id: r.tradeUuid,
+          context: r.context,
+          sub_trade_id: u.subTradeUuid,
+          symbol: u.symbol,
+          archetype: u.archetype,
+          denominator: u.denominator as unknown as string,
+          start_epoch: u.startEpoch as unknown as string,
+          end_epoch: (u.endEpoch === null ? null : u.endEpoch) as unknown as string | null,
+          gain: u.gain as unknown as string,
+          mtm_price_at_boundary: (u.markToMarketPriceAtBoundary ?? null) as unknown as string | null,
+          days: u.days,
+          yield: u.yield as unknown as string,
+          fees_and_commissions: u.feesAndCommissions as unknown as string,
+          explanation: u.explanation ?? null,
+          started_by: provenance.startedBy,
+          job_id: provenance.jobId,
+          writer: provenance.writerLambda,
+          writer_version: provenance.writerVersion,
+          written_at: provenance.writtenAt as unknown as string,
+          created_by: owner,
+          updated_by: owner,
+        }).execute();
+      }
       log.info(`putSubTradeYieldUnitRows: wrote ${rows.length} rows`);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
@@ -190,7 +234,6 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Convenience constructor for a `_TradeYieldSegment` row from a (context, segment) pair.
-   * Used by callers that want to compute the SK strings once and persist the row directly.
    * The segment's `uuid` must already be populated by the upstream evaluator.
    */
   buildSegmentRow(context: YieldContext, segment: TradeYieldSegment): _TradeYieldSegment {
@@ -201,8 +244,6 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       context,
       tradeUuid: segment.tradeUuid,
       segment,
-      contextTradeStartSk: makeContextTradeStartSk(context, segment.tradeUuid, segment.startEpoch, segment.uuid),
-      tradeContextStartSk: makeTradeContextStartSk(segment.tradeUuid, context, segment.startEpoch, segment.uuid),
     };
   }
 
@@ -216,8 +257,6 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       tradeUuid: unit.tradeUuid,
       subTradeUuid: unit.subTradeUuid,
       unit,
-      contextTradeSubTradeUnitSk: makeContextTradeSubTradeUnitSk(context, unit.tradeUuid, unit.subTradeUuid, unit.uuid),
-      tradeContextSubTradeUnitSk: makeTradeContextSubTradeUnitSk(unit.tradeUuid, context, unit.subTradeUuid, unit.uuid),
     };
   }
 
@@ -225,25 +264,29 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Return every segment fact row for one (trade, context) — the input to summary
-   * hydration on read. Single LSI Query with `${tradeUuid}#${context}#` prefix.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
+   * hydration on read. Reassembles each segment's `transactionPortions[]` from the
+   * child table.
    */
   async getSegmentRowsForTradeAndContext(tradeUuid: TradeUUID, context: YieldContext): Promise<_TradeYieldSegment[]> {
     const log = this.#log.setMethod('getSegmentRowsForTradeAndContext');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const keyExpr: KeyStructuredExpression = {
-        partitionFieldName: 'owner',
-        operator: '=',
-        value: owner,
-        sortFieldName: 'tradeContextStartSk',
-        sortOperator: 'begins_with',
-        sortValue: `${tradeUuid}#${context}#`,
-      };
-      return await this.#dynamo.query<_TradeYieldSegment>(TRADE_YIELD_SEGMENTS, BY_TRADE_INDEX, keyExpr);
+      const segRows = await this.#db.selectFrom('trade_yield_segments').selectAll()
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .where('context', '=', context)
+        .execute();
+      if (segRows.length === 0) return [];
+      const portionRows = await this.#db.selectFrom('trade_yield_segment_transaction_portions').selectAll()
+        .where('segment_id', 'in', segRows.map(r => r.segment_id))
+        .execute();
+      const portionsBySegment = new Map<string, typeof portionRows>();
+      for (const p of portionRows) {
+        const arr = portionsBySegment.get(p.segment_id);
+        if (arr) arr.push(p);
+        else portionsBySegment.set(p.segment_id, [p]);
+      }
+      return segRows.map(r => segmentRowToRecord(r, portionsBySegment.get(r.segment_id) ?? []));
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -251,24 +294,17 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Return every sub-trade-yield-unit fact row for one (trade, context).
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
    */
   async getSubTradeYieldUnitRowsForTradeAndContext(tradeUuid: TradeUUID, context: YieldContext): Promise<_SubTradeYieldUnit[]> {
     const log = this.#log.setMethod('getSubTradeYieldUnitRowsForTradeAndContext');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const keyExpr: KeyStructuredExpression = {
-        partitionFieldName: 'owner',
-        operator: '=',
-        value: owner,
-        sortFieldName: 'tradeContextSubTradeUnitSk',
-        sortOperator: 'begins_with',
-        sortValue: `${tradeUuid}#${context}#`,
-      };
-      return await this.#dynamo.query<_SubTradeYieldUnit>(SUB_TRADE_YIELD_UNITS, BY_TRADE_INDEX, keyExpr);
+      const rows = await this.#db.selectFrom('sub_trade_yield_units').selectAll()
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .where('context', '=', context)
+        .execute();
+      return rows.map(unitRowToRecord);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -279,29 +315,12 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   /**
    * Atomic write of an open-trade summary AND replacement of its fact rows.
    * Replaces ALL open-context segment + unit rows for the trade with the supplied
-   * set, then puts the summary row. The supplied summary's segments / units must
+   * set, then upserts the summary row. The supplied summary's segments / units must
    * have their `uuid` fields populated.
    *
    * Optional `existsCheck` is invoked BEFORE any write or delete to verify the
    * underlying trade still exists in `financials.trades`. If it returns false,
-   * throws `OrphanTradeError` and persists nothing. Callers (orchestrator chunk
-   * workers, F1 audit-repair) should catch the error and skip — see (C1) in
-   * the 2026-05-18 orphan-summary investigation arc.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
-   * - `dynamodb:GetItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * - TODO: union `existsCheck` callback IAM at the orchestrator call site (typically `TradesTrustedApi.getThinTrade` on `financials.trades`)
-   * @iam dynamodb:BatchWriteItem on OPEN_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:BatchWriteItem on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:BatchWriteItem on TRADE_YIELD_SEGMENTS
-   * @iam dynamodb:GetItem on OPEN_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
+   * throws `OrphanTradeError` and persists nothing.
    */
   async putOpenTradeSummary(
     summary: TradeYieldSegmentSummary,
@@ -322,39 +341,74 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       if (segmentRows.length > 0) await this.putSegmentRows(segmentRows, provenance);
       if (unitRows.length > 0) await this.putSubTradeYieldUnitRows(unitRows, provenance);
 
-      const row: _OpenTradeYieldSummary = {
+      await this.#db.insertInto('open_trade_yield_summaries').values({
         owner,
-        tradeUuid: summary.tradeUuid,
-        peakSimultaneousCaR: summary.peakSimultaneousCaR,
-        startEpoch: summary.startEpoch,
-        endEpoch: summary.endEpoch,
+        trade_id: summary.tradeUuid,
+        peak_simultaneous_car: summary.peakSimultaneousCaR as unknown as string,
+        start_epoch: summary.startEpoch as unknown as string,
+        end_epoch: (summary.endEpoch === null ? null : summary.endEpoch) as unknown as string | null,
         days: summary.days,
-        totalGain: summary.totalGain,
-        realizedGain: summary.realizedGain,
-        unrealizedGain: summary.unrealizedGain,
-        passiveGain: summary.passiveGain,
-        feesAndCommissions: summary.feesAndCommissions,
-        yield: summary.yield,
-        annualizedYieldLinear: summary.annualizedYieldLinear,
-        annualizedYieldCagr: summary.annualizedYieldCagr,
-        subTradeWins:       summary.subTradeWins,
-        subTradeLosses:     summary.subTradeLosses,
-        subTradeBreakevens: summary.subTradeBreakevens,
-        subTradeWinRate:    summary.subTradeWinRate,
-        subTradeWinAmount:  summary.subTradeWinAmount,
-        subTradeLossAmount: summary.subTradeLossAmount,
-        segmentUuids: summary.segments.map(s => s.uuid!) as TradeYieldSegmentUUID[],
-        subTradeYieldUnitUuids: summary.subTradeYieldUnits.map(u => u.uuid!) as SubTradeYieldUnitUUID[],
-        computedAt: summary.computedAt,
-      };
-      if (summary.priceSource !== undefined) row.priceSource = summary.priceSource;
-      if (summary.closingDate !== undefined) row.closingDate = summary.closingDate;
-      if (summary.explanation !== undefined) row.explanation = summary.explanation;
-      if (summary.priceCoverage !== undefined) row.priceCoverage = summary.priceCoverage;
-      if (summary.recomputeAttempts !== undefined) row.recomputeAttempts = summary.recomputeAttempts;
-      this.#stampRows([row], provenance);
-
-      await this.#dynamo.batchPut({[OPEN_TRADE_YIELD_SUMMARIES]: [row]});
+        total_gain: summary.totalGain as unknown as string,
+        realized_gain: summary.realizedGain as unknown as string,
+        unrealized_gain: summary.unrealizedGain as unknown as string,
+        passive_gain: summary.passiveGain as unknown as string,
+        fees_and_commissions: summary.feesAndCommissions as unknown as string,
+        yield: summary.yield as unknown as string,
+        annualized_yield_linear: summary.annualizedYieldLinear as unknown as string,
+        annualized_yield_cagr: summary.annualizedYieldCagr as unknown as string,
+        sub_trade_wins: summary.subTradeWins,
+        sub_trade_losses: summary.subTradeLosses,
+        sub_trade_breakevens: summary.subTradeBreakevens,
+        sub_trade_win_rate: (summary.subTradeWinRate === null ? null : summary.subTradeWinRate) as unknown as string | null,
+        sub_trade_win_amount: summary.subTradeWinAmount as unknown as string,
+        sub_trade_loss_amount: summary.subTradeLossAmount as unknown as string,
+        price_source: summary.priceSource ?? null,
+        closing_date: (summary.closingDate ?? null) as unknown as Date | null,
+        computed_at: summary.computedAt as unknown as string,
+        explanation: summary.explanation ?? null,
+        price_coverage: (summary.priceCoverage ?? null) as unknown as string | null,
+        recompute_attempts: summary.recomputeAttempts ?? null,
+        started_by: provenance.startedBy,
+        job_id: provenance.jobId,
+        writer: provenance.writerLambda,
+        writer_version: provenance.writerVersion,
+        written_at: provenance.writtenAt as unknown as string,
+        created_by: owner,
+        updated_by: owner,
+      })
+        .onConflict(oc => oc.columns(['owner', 'trade_id']).doUpdateSet(eb => ({
+          peak_simultaneous_car: eb.ref('excluded.peak_simultaneous_car'),
+          start_epoch: eb.ref('excluded.start_epoch'),
+          end_epoch: eb.ref('excluded.end_epoch'),
+          days: eb.ref('excluded.days'),
+          total_gain: eb.ref('excluded.total_gain'),
+          realized_gain: eb.ref('excluded.realized_gain'),
+          unrealized_gain: eb.ref('excluded.unrealized_gain'),
+          passive_gain: eb.ref('excluded.passive_gain'),
+          fees_and_commissions: eb.ref('excluded.fees_and_commissions'),
+          yield: eb.ref('excluded.yield'),
+          annualized_yield_linear: eb.ref('excluded.annualized_yield_linear'),
+          annualized_yield_cagr: eb.ref('excluded.annualized_yield_cagr'),
+          sub_trade_wins: eb.ref('excluded.sub_trade_wins'),
+          sub_trade_losses: eb.ref('excluded.sub_trade_losses'),
+          sub_trade_breakevens: eb.ref('excluded.sub_trade_breakevens'),
+          sub_trade_win_rate: eb.ref('excluded.sub_trade_win_rate'),
+          sub_trade_win_amount: eb.ref('excluded.sub_trade_win_amount'),
+          sub_trade_loss_amount: eb.ref('excluded.sub_trade_loss_amount'),
+          price_source: eb.ref('excluded.price_source'),
+          closing_date: eb.ref('excluded.closing_date'),
+          computed_at: eb.ref('excluded.computed_at'),
+          explanation: eb.ref('excluded.explanation'),
+          price_coverage: eb.ref('excluded.price_coverage'),
+          recompute_attempts: eb.ref('excluded.recompute_attempts'),
+          started_by: eb.ref('excluded.started_by'),
+          job_id: eb.ref('excluded.job_id'),
+          writer: eb.ref('excluded.writer'),
+          writer_version: eb.ref('excluded.writer_version'),
+          written_at: eb.ref('excluded.written_at'),
+          updated_by: eb.ref('excluded.updated_by'),
+        })))
+        .execute();
       log.info(`putOpenTradeSummary: tradeUuid=${summary.tradeUuid} segments=${segmentRows.length} units=${unitRows.length} startedBy=${provenance.startedBy}`);
     } catch (err) {
       // OrphanTradeError is a control-flow signal (trade deleted out from under
@@ -372,20 +426,12 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Composite read: summary row + segments + units for one open trade, projected
    * to the public `TradeYieldSegmentSummary` wire shape. Returns undefined when
    * no summary row exists.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:GetItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * @iam dynamodb:GetItem on OPEN_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
    */
   async getOpenTradeSummary(tradeUuid: TradeUUID): Promise<TradeYieldSegmentSummary | undefined> {
     const log = this.#log.setMethod('getOpenTradeSummary');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const row = await this.#dynamo.get<_OpenTradeYieldSummary>(OPEN_TRADE_YIELD_SUMMARIES, {owner, tradeUuid});
+      const row = await this.#openSummaryRow(owner, tradeUuid);
       if (!row) return undefined;
       const [segments, units] = await Promise.all([
         this.getSegmentRowsForTradeAndContext(tradeUuid, OPEN_CONTEXT).then(rs => rs.map(toTradeYieldSegment)),
@@ -399,19 +445,17 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Return every open-trade summary scalar row for the session owner (no segment hydration).
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * @iam dynamodb:Query on OPEN_TRADE_YIELD_SUMMARIES
    */
   async getAllOpenTradeSummaryRows(): Promise<_OpenTradeYieldSummary[]> {
     const log = this.#log.setMethod('getAllOpenTradeSummaryRows');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      return await this.#dynamo.query<_OpenTradeYieldSummary>(
-        OPEN_TRADE_YIELD_SUMMARIES, false,
-        {partitionFieldName: 'owner', operator: '=', value: owner},
-      );
+      const rows = await this.#db.selectFrom('open_trade_yield_summaries')
+        .selectAll()
+        .select(sql<string | null>`closing_date::text`.as('closing_date'))
+        .where('owner', '=', owner)
+        .execute();
+      return rows.map(r => this.#openSummaryRowToRecord(r as OpenSummaryRow));
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -422,10 +466,6 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * summary rows whose provenance `writtenAt` is older than `cutoffEpoch` OR
    * whose `writtenAt` is missing (pre-PRD rows). Useful for staleness audits
    * and the audit-pipeline `excessive-staleness` check.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * @iam dynamodb:Query on OPEN_TRADE_YIELD_SUMMARIES
    */
   async findStaleOpenTradeSummaries(cutoffEpoch: number): Promise<_OpenTradeYieldSummary[]> {
     const log = this.#log.setMethod('findStaleOpenTradeSummaries');
@@ -442,13 +482,6 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * `groupBy` selects which attribute keys the result map. Returns a Map keyed by
    * the attribute value (or `'(unknown / pre-provenance)'` for rows missing it)
    * with `{count, sampleTradeUuids, firstWrittenAt, lastWrittenAt}` per group.
-   *
-   * Use case: "which writer is producing the most rows right now?" — answer is
-   * a single Query+groupBy without leaving the persistence package.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * @iam dynamodb:Query on OPEN_TRADE_YIELD_SUMMARIES
    */
   async groupOpenSummariesByProvenance(
     groupBy: 'writerLambda' | 'startedBy' | 'writerVersion',
@@ -486,20 +519,7 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    *
    * Optional `existsCheck` mirrors the open-summary guard: throws
    * `OrphanTradeError` if the trade no longer exists in `financials.trades`,
-   * persisting nothing. Callers should catch and skip.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.as-of-trade-yield-summaries` (+ test mirror)
-   * - TODO: union `existsCheck` callback IAM at the orchestrator call site (typically `TradesTrustedApi.getThinTrade` on `financials.trades`)
-   * @iam dynamodb:BatchWriteItem on AS_OF_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:BatchWriteItem on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:BatchWriteItem on TRADE_YIELD_SEGMENTS
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
+   * persisting nothing.
    */
   async putAsOfTradeSummary(
     summary: AsOfTradeYieldSegmentSummary,
@@ -521,51 +541,79 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       if (segmentRows.length > 0) await this.putSegmentRows(segmentRows, provenance);
       if (unitRows.length > 0) await this.putSubTradeYieldUnitRows(unitRows, provenance);
 
-      const row: _AsOfTradeYieldSummary = {
+      await this.#db.insertInto('as_of_trade_yield_summaries').values({
         owner,
-        tradeUuid: summary.tradeUuid,
-        asOfDate: summary.asOfDate,
-        asOfEpoch: summary.asOfEpoch,
-        asOfDateTradeUuidSk: makeAsOfDateTradeUuidSk(summary.asOfDate, summary.tradeUuid),
-        tradeUuidAsOfDateSk: makeTradeUuidAsOfDateSk(summary.tradeUuid, summary.asOfDate),
-        peakSimultaneousCaR: summary.peakSimultaneousCaR,
-        startEpoch: summary.startEpoch,
-        endEpoch: summary.endEpoch,
+        trade_id: summary.tradeUuid,
+        as_of_date: summary.asOfDate as unknown as Date,
+        as_of_epoch: summary.asOfEpoch as unknown as string,
+        peak_simultaneous_car: summary.peakSimultaneousCaR as unknown as string,
+        start_epoch: summary.startEpoch as unknown as string,
+        end_epoch: (summary.endEpoch === null ? null : summary.endEpoch) as unknown as string | null,
         days: summary.days,
-        totalGain: summary.totalGain,
-        realizedGain: summary.realizedGain,
-        unrealizedGain: summary.unrealizedGain,
-        passiveGain: summary.passiveGain,
-        feesAndCommissions: summary.feesAndCommissions,
-        yield: summary.yield,
-        annualizedYieldLinear: summary.annualizedYieldLinear,
-        annualizedYieldCagr: summary.annualizedYieldCagr,
-        priceCoverage: summary.priceCoverage,
-        subTradeWins:       summary.subTradeWins,
-        subTradeLosses:     summary.subTradeLosses,
-        subTradeBreakevens: summary.subTradeBreakevens,
-        subTradeWinRate:    summary.subTradeWinRate,
-        subTradeWinAmount:  summary.subTradeWinAmount,
-        subTradeLossAmount: summary.subTradeLossAmount,
-        segmentUuids: summary.segments.map(s => s.uuid!) as TradeYieldSegmentUUID[],
-        subTradeYieldUnitUuids: summary.subTradeYieldUnits.map(u => u.uuid!) as SubTradeYieldUnitUUID[],
-        computedAt: summary.computedAt,
-      };
-      if (summary.error !== undefined) row.error = summary.error;
-      if (summary.priceSource !== undefined) row.priceSource = summary.priceSource;
-      if (summary.closingDate !== undefined) row.closingDate = summary.closingDate;
-      if (summary.explanation !== undefined) row.explanation = summary.explanation;
-      this.#stampRows([row], provenance);
-
-      await this.#dynamo.batchPut({[AS_OF_TRADE_YIELD_SUMMARIES]: [row]});
+        total_gain: summary.totalGain as unknown as string,
+        realized_gain: summary.realizedGain as unknown as string,
+        unrealized_gain: summary.unrealizedGain as unknown as string,
+        passive_gain: summary.passiveGain as unknown as string,
+        fees_and_commissions: summary.feesAndCommissions as unknown as string,
+        yield: summary.yield as unknown as string,
+        annualized_yield_linear: summary.annualizedYieldLinear as unknown as string,
+        annualized_yield_cagr: summary.annualizedYieldCagr as unknown as string,
+        sub_trade_wins: summary.subTradeWins,
+        sub_trade_losses: summary.subTradeLosses,
+        sub_trade_breakevens: summary.subTradeBreakevens,
+        sub_trade_win_rate: (summary.subTradeWinRate === null ? null : summary.subTradeWinRate) as unknown as string | null,
+        sub_trade_win_amount: summary.subTradeWinAmount as unknown as string,
+        sub_trade_loss_amount: summary.subTradeLossAmount as unknown as string,
+        price_coverage: summary.priceCoverage as unknown as string,
+        error: summary.error ?? null,
+        price_source: summary.priceSource ?? null,
+        closing_date: (summary.closingDate ?? null) as unknown as Date | null,
+        explanation: summary.explanation ?? null,
+        computed_at: summary.computedAt as unknown as string,
+        started_by: provenance.startedBy,
+        job_id: provenance.jobId,
+        writer: provenance.writerLambda,
+        writer_version: provenance.writerVersion,
+        written_at: provenance.writtenAt as unknown as string,
+        created_by: owner,
+        updated_by: owner,
+      })
+        .onConflict(oc => oc.columns(['owner', 'trade_id', 'as_of_date']).doUpdateSet(eb => ({
+          as_of_epoch: eb.ref('excluded.as_of_epoch'),
+          peak_simultaneous_car: eb.ref('excluded.peak_simultaneous_car'),
+          start_epoch: eb.ref('excluded.start_epoch'),
+          end_epoch: eb.ref('excluded.end_epoch'),
+          days: eb.ref('excluded.days'),
+          total_gain: eb.ref('excluded.total_gain'),
+          realized_gain: eb.ref('excluded.realized_gain'),
+          unrealized_gain: eb.ref('excluded.unrealized_gain'),
+          passive_gain: eb.ref('excluded.passive_gain'),
+          fees_and_commissions: eb.ref('excluded.fees_and_commissions'),
+          yield: eb.ref('excluded.yield'),
+          annualized_yield_linear: eb.ref('excluded.annualized_yield_linear'),
+          annualized_yield_cagr: eb.ref('excluded.annualized_yield_cagr'),
+          sub_trade_wins: eb.ref('excluded.sub_trade_wins'),
+          sub_trade_losses: eb.ref('excluded.sub_trade_losses'),
+          sub_trade_breakevens: eb.ref('excluded.sub_trade_breakevens'),
+          sub_trade_win_rate: eb.ref('excluded.sub_trade_win_rate'),
+          sub_trade_win_amount: eb.ref('excluded.sub_trade_win_amount'),
+          sub_trade_loss_amount: eb.ref('excluded.sub_trade_loss_amount'),
+          price_coverage: eb.ref('excluded.price_coverage'),
+          error: eb.ref('excluded.error'),
+          price_source: eb.ref('excluded.price_source'),
+          closing_date: eb.ref('excluded.closing_date'),
+          explanation: eb.ref('excluded.explanation'),
+          computed_at: eb.ref('excluded.computed_at'),
+          started_by: eb.ref('excluded.started_by'),
+          job_id: eb.ref('excluded.job_id'),
+          writer: eb.ref('excluded.writer'),
+          writer_version: eb.ref('excluded.writer_version'),
+          written_at: eb.ref('excluded.written_at'),
+          updated_by: eb.ref('excluded.updated_by'),
+        })))
+        .execute();
       log.info(`putAsOfTradeSummary: tradeUuid=${summary.tradeUuid} asOfDate=${summary.asOfDate} segments=${segmentRows.length} units=${unitRows.length} startedBy=${provenance.startedBy}`);
     } catch (err) {
-      // OrphanTradeError is a control-flow signal (trade deleted out from under
-      // an in-flight reconstitution), not an infrastructure error. It must
-      // survive unwrapped so the caller's isOrphanTradeError() benign-skip guard
-      // fires — logAndEnhanceError would re-wrap it as a plain EnhancedError
-      // (name 'Error'), defeating the guard. Mirrors the PauseRetryError
-      // pass-through convention.
       if (isOrphanTradeError(err)) throw err;
       throw logAndEnhanceError(log, err as Error);
     }
@@ -573,30 +621,27 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Composite read of an as-of summary + its segments + units.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:GetItem` on `financials.trade-yield-persistence.as-of-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * @iam dynamodb:GetItem on AS_OF_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
    */
   async getAsOfTradeSummary(tradeUuid: TradeUUID, asOfDate: Datestamp): Promise<AsOfTradeYieldSegmentSummary | undefined> {
     const log = this.#log.setMethod('getAsOfTradeSummary');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     const context = asOfContext(asOfDate);
     try {
-      const row = await this.#dynamo.get<_AsOfTradeYieldSummary>(
-        AS_OF_TRADE_YIELD_SUMMARIES,
-        {owner, asOfDateTradeUuidSk: makeAsOfDateTradeUuidSk(asOfDate, tradeUuid)},
-      );
+      const row = await this.#db.selectFrom('as_of_trade_yield_summaries')
+        .selectAll()
+        .select(sql<string>`as_of_date::text`.as('as_of_date'))
+        .select(sql<string | null>`closing_date::text`.as('closing_date'))
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .where('as_of_date', '=', asOfDate as unknown as Date)
+        .executeTakeFirst();
       if (!row) return undefined;
+      const record = asOfSummaryRowToRecord(row as AsOfSummaryRow);
       const [segments, units] = await Promise.all([
         this.getSegmentRowsForTradeAndContext(tradeUuid, context).then(rs => rs.map(toTradeYieldSegment)),
         this.getSubTradeYieldUnitRowsForTradeAndContext(tradeUuid, context).then(rs => rs.map(toSubTradeYieldUnit)),
       ]);
-      return toAsOfTradeYieldSummary(row, segments, units);
+      return toAsOfTradeYieldSummary(record, segments, units);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -604,17 +649,22 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Every as-of summary row for one trade across dates (no segment hydration).
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries/index/byTrade-index` (+ test mirror)
-   * @iam dynamodb:Query on AS_OF_TRADE_YIELD_SUMMARIES
+   * Optional inclusive `range` filters by as_of_date.
    */
   async getAsOfTradeSummaryRowsForTrade(tradeUuid: TradeUUID, range?: DateRange): Promise<_AsOfTradeYieldSummary[]> {
     const log = this.#log.setMethod('getAsOfTradeSummaryRowsForTrade');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const keyExpr = buildLsiQueryByPrefixWithRange(owner, 'tradeUuidAsOfDateSk', tradeUuid, range);
-      return await this.#dynamo.query<_AsOfTradeYieldSummary>(AS_OF_TRADE_YIELD_SUMMARIES, BY_TRADE_INDEX, keyExpr);
+      let q = this.#db.selectFrom('as_of_trade_yield_summaries')
+        .selectAll()
+        .select(sql<string>`as_of_date::text`.as('as_of_date'))
+        .select(sql<string | null>`closing_date::text`.as('closing_date'))
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid);
+      if (range?.from) q = q.where('as_of_date', '>=', range.from as unknown as Date);
+      if (range?.to) q = q.where('as_of_date', '<=', range.to as unknown as Date);
+      const rows = await q.execute();
+      return rows.map(r => asOfSummaryRowToRecord(r as AsOfSummaryRow));
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -622,24 +672,20 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Every as-of summary row for one owner on one asOfDate (no segment hydration).
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries` (+ test mirror)
-   * @iam dynamodb:Query on AS_OF_TRADE_YIELD_SUMMARIES
+   * Uses the (owner, as_of_date) index.
    */
   async getAsOfTradeSummaryRowsForOwnerAndDate(asOfDate: Datestamp): Promise<_AsOfTradeYieldSummary[]> {
     const log = this.#log.setMethod('getAsOfTradeSummaryRowsForOwnerAndDate');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const keyExpr: KeyStructuredExpression = {
-        partitionFieldName: 'owner',
-        operator: '=',
-        value: owner,
-        sortFieldName: 'asOfDateTradeUuidSk',
-        sortOperator: 'begins_with',
-        sortValue: `${asOfDate}#`,
-      };
-      return await this.#dynamo.query<_AsOfTradeYieldSummary>(AS_OF_TRADE_YIELD_SUMMARIES, false, keyExpr);
+      const rows = await this.#db.selectFrom('as_of_trade_yield_summaries')
+        .selectAll()
+        .select(sql<string>`as_of_date::text`.as('as_of_date'))
+        .select(sql<string | null>`closing_date::text`.as('closing_date'))
+        .where('owner', '=', owner)
+        .where('as_of_date', '=', asOfDate as unknown as Date)
+        .execute();
+      return rows.map(r => asOfSummaryRowToRecord(r as AsOfSummaryRow));
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -650,18 +696,6 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   /**
    * Atomic write of a since-trade summary AND replacement of its fact rows for
    * the (trade, sinceAnchorEpoch) context.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.since-trade-yield-summaries` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on SINCE_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:BatchWriteItem on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:BatchWriteItem on TRADE_YIELD_SEGMENTS
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
    */
   async putSinceTradeSummary(
     summary: SinceTradeYieldSegmentSummary,
@@ -678,41 +712,73 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       if (segmentRows.length > 0) await this.putSegmentRows(segmentRows, provenance);
       if (unitRows.length > 0) await this.putSubTradeYieldUnitRows(unitRows, provenance);
 
-      const row: _SinceTradeYieldSummary = {
+      await this.#db.insertInto('since_trade_yield_summaries').values({
         owner,
-        tradeUuid: summary.tradeUuid,
-        sinceAnchorEpoch: summary.sinceAnchorEpoch,
-        sinceAnchorTradeUuidSk: makeSinceAnchorTradeUuidSk(summary.sinceAnchorEpoch, summary.tradeUuid),
-        tradeUuidSinceAnchorSk: makeTradeUuidSinceAnchorSk(summary.tradeUuid, summary.sinceAnchorEpoch),
-        peakSimultaneousCaR: summary.peakSimultaneousCaR,
-        startEpoch: summary.startEpoch,
-        endEpoch: summary.endEpoch,
+        trade_id: summary.tradeUuid,
+        since_anchor_epoch: summary.sinceAnchorEpoch as unknown as string,
+        gain_since: summary.gainSince as unknown as string,
+        peak_simultaneous_car: summary.peakSimultaneousCaR as unknown as string,
+        start_epoch: summary.startEpoch as unknown as string,
+        end_epoch: (summary.endEpoch === null ? null : summary.endEpoch) as unknown as string | null,
         days: summary.days,
-        totalGain: summary.totalGain,
-        realizedGain: summary.realizedGain,
-        unrealizedGain: summary.unrealizedGain,
-        passiveGain: summary.passiveGain,
-        feesAndCommissions: summary.feesAndCommissions,
-        yield: summary.yield,
-        annualizedYieldLinear: summary.annualizedYieldLinear,
-        annualizedYieldCagr: summary.annualizedYieldCagr,
-        gainSince: summary.gainSince,
-        subTradeWins:       summary.subTradeWins,
-        subTradeLosses:     summary.subTradeLosses,
-        subTradeBreakevens: summary.subTradeBreakevens,
-        subTradeWinRate:    summary.subTradeWinRate,
-        subTradeWinAmount:  summary.subTradeWinAmount,
-        subTradeLossAmount: summary.subTradeLossAmount,
-        segmentUuids: summary.segments.map(s => s.uuid!) as TradeYieldSegmentUUID[],
-        subTradeYieldUnitUuids: summary.subTradeYieldUnits.map(u => u.uuid!) as SubTradeYieldUnitUUID[],
-        computedAt: summary.computedAt,
-      };
-      if (summary.priceSource !== undefined) row.priceSource = summary.priceSource;
-      if (summary.closingDate !== undefined) row.closingDate = summary.closingDate;
-      if (summary.explanation !== undefined) row.explanation = summary.explanation;
-      this.#stampRows([row], provenance);
-
-      await this.#dynamo.batchPut({[SINCE_TRADE_YIELD_SUMMARIES]: [row]});
+        total_gain: summary.totalGain as unknown as string,
+        realized_gain: summary.realizedGain as unknown as string,
+        unrealized_gain: summary.unrealizedGain as unknown as string,
+        passive_gain: summary.passiveGain as unknown as string,
+        fees_and_commissions: summary.feesAndCommissions as unknown as string,
+        yield: summary.yield as unknown as string,
+        annualized_yield_linear: summary.annualizedYieldLinear as unknown as string,
+        annualized_yield_cagr: summary.annualizedYieldCagr as unknown as string,
+        sub_trade_wins: summary.subTradeWins,
+        sub_trade_losses: summary.subTradeLosses,
+        sub_trade_breakevens: summary.subTradeBreakevens,
+        sub_trade_win_rate: (summary.subTradeWinRate === null ? null : summary.subTradeWinRate) as unknown as string | null,
+        sub_trade_win_amount: summary.subTradeWinAmount as unknown as string,
+        sub_trade_loss_amount: summary.subTradeLossAmount as unknown as string,
+        price_source: summary.priceSource ?? null,
+        closing_date: (summary.closingDate ?? null) as unknown as Date | null,
+        explanation: summary.explanation ?? null,
+        computed_at: summary.computedAt as unknown as string,
+        started_by: provenance.startedBy,
+        job_id: provenance.jobId,
+        writer: provenance.writerLambda,
+        writer_version: provenance.writerVersion,
+        written_at: provenance.writtenAt as unknown as string,
+        created_by: owner,
+        updated_by: owner,
+      })
+        .onConflict(oc => oc.columns(['owner', 'trade_id', 'since_anchor_epoch']).doUpdateSet(eb => ({
+          gain_since: eb.ref('excluded.gain_since'),
+          peak_simultaneous_car: eb.ref('excluded.peak_simultaneous_car'),
+          start_epoch: eb.ref('excluded.start_epoch'),
+          end_epoch: eb.ref('excluded.end_epoch'),
+          days: eb.ref('excluded.days'),
+          total_gain: eb.ref('excluded.total_gain'),
+          realized_gain: eb.ref('excluded.realized_gain'),
+          unrealized_gain: eb.ref('excluded.unrealized_gain'),
+          passive_gain: eb.ref('excluded.passive_gain'),
+          fees_and_commissions: eb.ref('excluded.fees_and_commissions'),
+          yield: eb.ref('excluded.yield'),
+          annualized_yield_linear: eb.ref('excluded.annualized_yield_linear'),
+          annualized_yield_cagr: eb.ref('excluded.annualized_yield_cagr'),
+          sub_trade_wins: eb.ref('excluded.sub_trade_wins'),
+          sub_trade_losses: eb.ref('excluded.sub_trade_losses'),
+          sub_trade_breakevens: eb.ref('excluded.sub_trade_breakevens'),
+          sub_trade_win_rate: eb.ref('excluded.sub_trade_win_rate'),
+          sub_trade_win_amount: eb.ref('excluded.sub_trade_win_amount'),
+          sub_trade_loss_amount: eb.ref('excluded.sub_trade_loss_amount'),
+          price_source: eb.ref('excluded.price_source'),
+          closing_date: eb.ref('excluded.closing_date'),
+          explanation: eb.ref('excluded.explanation'),
+          computed_at: eb.ref('excluded.computed_at'),
+          started_by: eb.ref('excluded.started_by'),
+          job_id: eb.ref('excluded.job_id'),
+          writer: eb.ref('excluded.writer'),
+          writer_version: eb.ref('excluded.writer_version'),
+          written_at: eb.ref('excluded.written_at'),
+          updated_by: eb.ref('excluded.updated_by'),
+        })))
+        .execute();
       log.info(`putSinceTradeSummary: tradeUuid=${summary.tradeUuid} anchor=${summary.sinceAnchorEpoch} startedBy=${provenance.startedBy}`);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
@@ -721,30 +787,26 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Composite read of a since-summary + its segments + units.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:GetItem` on `financials.trade-yield-persistence.since-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * @iam dynamodb:GetItem on SINCE_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
    */
   async getSinceTradeSummary(tradeUuid: TradeUUID, sinceAnchorEpoch: number): Promise<SinceTradeYieldSegmentSummary | undefined> {
     const log = this.#log.setMethod('getSinceTradeSummary');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     const context = sinceContext(sinceAnchorEpoch);
     try {
-      const row = await this.#dynamo.get<_SinceTradeYieldSummary>(
-        SINCE_TRADE_YIELD_SUMMARIES,
-        {owner, sinceAnchorTradeUuidSk: makeSinceAnchorTradeUuidSk(sinceAnchorEpoch, tradeUuid)},
-      );
+      const row = await this.#db.selectFrom('since_trade_yield_summaries')
+        .selectAll()
+        .select(sql<string | null>`closing_date::text`.as('closing_date'))
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .where('since_anchor_epoch', '=', sinceAnchorEpoch as unknown as string)
+        .executeTakeFirst();
       if (!row) return undefined;
+      const record = sinceSummaryRowToRecord(row as SinceSummaryRow);
       const [segments, units] = await Promise.all([
         this.getSegmentRowsForTradeAndContext(tradeUuid, context).then(rs => rs.map(toTradeYieldSegment)),
         this.getSubTradeYieldUnitRowsForTradeAndContext(tradeUuid, context).then(rs => rs.map(toSubTradeYieldUnit)),
       ]);
-      return toSinceTradeYieldSummary(row, segments, units);
+      return toSinceTradeYieldSummary(record, segments, units);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -752,24 +814,18 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Every since-summary row for one trade across anchors (no segment hydration).
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.since-trade-yield-summaries/index/byTrade-index` (+ test mirror)
-   * @iam dynamodb:Query on SINCE_TRADE_YIELD_SUMMARIES
    */
   async getSinceTradeSummaryRowsForTrade(tradeUuid: TradeUUID): Promise<_SinceTradeYieldSummary[]> {
     const log = this.#log.setMethod('getSinceTradeSummaryRowsForTrade');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const keyExpr: KeyStructuredExpression = {
-        partitionFieldName: 'owner',
-        operator: '=',
-        value: owner,
-        sortFieldName: 'tradeUuidSinceAnchorSk',
-        sortOperator: 'begins_with',
-        sortValue: `${tradeUuid}#`,
-      };
-      return await this.#dynamo.query<_SinceTradeYieldSummary>(SINCE_TRADE_YIELD_SUMMARIES, BY_TRADE_INDEX, keyExpr);
+      const rows = await this.#db.selectFrom('since_trade_yield_summaries')
+        .selectAll()
+        .select(sql<string | null>`closing_date::text`.as('closing_date'))
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .execute();
+      return rows.map(r => sinceSummaryRowToRecord(r as SinceSummaryRow));
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -778,21 +834,63 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   // ── Daily MTM series I/O (E11.5) ────────────────────────────────────────────
 
   /**
-   * Idempotent batch put of daily MTM rows. Each row's `tradeDateSk` must be
-   * pre-populated via `makeTradeDateSk(tradeUuid, dateEpoch)`. Same-key writes
-   * silently overwrite — the populator is allowed to recompute and re-put any
+   * Idempotent batch put of daily MTM rows. Inserts each row into
+   * `trade_daily_mtm_series` AND its `segmentArchetypeContributions[]` into the
+   * child `trade_daily_mtm_archetype_contributions` table. Same-key writes
+   * overwrite (upsert) — the populator is allowed to recompute and re-put any
    * date without first deleting.
    *
-   * **IAM (transitive):**
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-daily-mtm-series` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on TRADE_DAILY_MTM_SERIES
+   * NOTE: provenance is accepted for parity with the other put methods, but the
+   * `trade_daily_mtm_series` table has no provenance columns (none in the 4a DDL),
+   * so it is not persisted.
    */
   async putDailyMTMRows(rows: _TradeDailyMTMSeries[], provenance: Provenance): Promise<void> {
     const log = this.#log.setMethod('putDailyMTMRows');
     if (rows.length === 0) return;
+    const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      this.#stampRows(rows, provenance);
-      await this.#dynamo.batchPut({[TRADE_DAILY_MTM_SERIES]: rows});
+      for (const r of rows) {
+        await this.#db.insertInto('trade_daily_mtm_series').values({
+          owner,
+          trade_id: r.tradeUuid,
+          date_epoch: r.dateEpoch as unknown as string,
+          date: r.date as unknown as Date,
+          mtm_amount: r.mtmAmount as unknown as string,
+          car_at_date: r.carAtDate as unknown as string,
+          price_coverage: r.priceCoverage as unknown as string,
+          computed_at: r.computedAt as unknown as string,
+          created_by: owner,
+          updated_by: owner,
+        })
+          .onConflict(oc => oc.columns(['owner', 'trade_id', 'date_epoch']).doUpdateSet(eb => ({
+            date: eb.ref('excluded.date'),
+            mtm_amount: eb.ref('excluded.mtm_amount'),
+            car_at_date: eb.ref('excluded.car_at_date'),
+            price_coverage: eb.ref('excluded.price_coverage'),
+            computed_at: eb.ref('excluded.computed_at'),
+            updated_by: eb.ref('excluded.updated_by'),
+          })))
+          .execute();
+
+        // Replace the bounded archetype-contribution children for this (owner, trade, date).
+        await this.#db.deleteFrom('trade_daily_mtm_archetype_contributions')
+          .where('owner', '=', owner)
+          .where('trade_id', '=', r.tradeUuid)
+          .where('date_epoch', '=', r.dateEpoch as unknown as string)
+          .execute();
+        if (r.segmentArchetypeContributions.length > 0) {
+          await this.#db.insertInto('trade_daily_mtm_archetype_contributions').values(
+            r.segmentArchetypeContributions.map(c => ({
+              owner,
+              trade_id: r.tradeUuid,
+              date_epoch: r.dateEpoch as unknown as string,
+              archetype: c.archetype,
+              car_contribution: c.carContribution as unknown as string,
+              created_by: owner,
+            })),
+          ).execute();
+        }
+      }
       log.info(`putDailyMTMRows: wrote ${rows.length} rows startedBy=${provenance.startedBy}`);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
@@ -800,27 +898,33 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   }
 
   /**
-   * All daily-MTM rows for one trade, base-SK-sorted ascending by date. Empty
-   * array (NOT undefined) when the populator hasn't run for this trade yet —
-   * callers use that signal to decide whether to enqueue the populator.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-daily-mtm-series` (+ test mirror)
-   * @iam dynamodb:Query on TRADE_DAILY_MTM_SERIES
+   * All daily-MTM rows for one trade, ordered ascending by date. Empty array (NOT
+   * undefined) when the populator hasn't run for this trade yet — callers use that
+   * signal to decide whether to enqueue the populator.
    */
   async queryDailyMTMSeriesForTrade(tradeUuid: TradeUUID): Promise<_TradeDailyMTMSeries[]> {
     const log = this.#log.setMethod('queryDailyMTMSeriesForTrade');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const keyExpr: KeyStructuredExpression = {
-        partitionFieldName: 'owner',
-        operator: '=',
-        value: owner,
-        sortFieldName: 'tradeDateSk',
-        sortOperator: 'begins_with',
-        sortValue: `${tradeUuid}#`,
-      };
-      return await this.#dynamo.query<_TradeDailyMTMSeries>(TRADE_DAILY_MTM_SERIES, false, keyExpr);
+      const rows = await this.#db.selectFrom('trade_daily_mtm_series')
+        .selectAll()
+        .select(sql<string>`date::text`.as('date'))
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .orderBy('date_epoch', 'asc')
+        .execute();
+      if (rows.length === 0) return [];
+      const contribRows = await this.#db.selectFrom('trade_daily_mtm_archetype_contributions').selectAll()
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .execute();
+      const byDate = new Map<string, typeof contribRows>();
+      for (const c of contribRows) {
+        const arr = byDate.get(c.date_epoch);
+        if (arr) arr.push(c);
+        else byDate.set(c.date_epoch, [c]);
+      }
+      return rows.map(r => dailyMtmRowToRecord(r as DailyMtmRow, byDate.get(r.date_epoch) ?? []));
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
@@ -828,47 +932,36 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Emergent watchlist for the nightly tail-extender: distinct `tradeUuid`
-   * values for the session owner. Implemented as a single-owner Query +
-   * client-side dedup since the partition is owner-scoped.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-daily-mtm-series` (+ test mirror)
-   * @iam dynamodb:Query on TRADE_DAILY_MTM_SERIES
+   * values for the session owner.
    */
   async getDistinctTradeUuidsWithDailyMTM(): Promise<TradeUUID[]> {
     const log = this.#log.setMethod('getDistinctTradeUuidsWithDailyMTM');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const rows = await this.#dynamo.query<_TradeDailyMTMSeries>(
-        TRADE_DAILY_MTM_SERIES, false,
-        {partitionFieldName: 'owner', operator: '=', value: owner},
-      );
-      const seen = new Set<TradeUUID>();
-      for (const r of rows) seen.add(r.tradeUuid);
-      return Array.from(seen);
+      const rows = await this.#db.selectFrom('trade_daily_mtm_series')
+        .select('trade_id')
+        .distinct()
+        .where('owner', '=', owner)
+        .execute();
+      return rows.map(r => r.trade_id as TradeUUID);
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
     }
   }
 
   /**
-   * Delete every daily-MTM row for one trade. Used by trade-deletion +
-   * yield-math invalidation. Repopulator will rebuild on next view.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-daily-mtm-series` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-daily-mtm-series` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on TRADE_DAILY_MTM_SERIES
-   * @iam dynamodb:Query on TRADE_DAILY_MTM_SERIES
+   * Delete every daily-MTM row for one trade (the archetype-contribution children
+   * cascade via FK). Used by trade-deletion + yield-math invalidation.
    */
   async deleteDailyMTMSeriesForTrade(tradeUuid: TradeUUID): Promise<number> {
     const log = this.#log.setMethod('deleteDailyMTMSeriesForTrade');
+    const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const rows = await this.queryDailyMTMSeriesForTrade(tradeUuid);
-      if (rows.length === 0) return 0;
-      const keys = rows.map(r => ({owner: r.owner, tradeDateSk: r.tradeDateSk}));
-      const count = keys.length;
-      await this.#dynamo.batchDelete({[TRADE_DAILY_MTM_SERIES]: keys});
+      const res = await this.#db.deleteFrom('trade_daily_mtm_series')
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .executeTakeFirst();
+      const count = Number(res.numDeletedRows ?? 0n);
       log.info(`deleteDailyMTMSeriesForTrade: tradeUuid=${tradeUuid} count=${count}`);
       return count;
     } catch (err) {
@@ -881,93 +974,53 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
   /**
    * Hard delete of every persistence-layer artifact for one trade — all summary
    * rows (open + every as-of + every since) AND every segment + sub-trade-unit
-   * fact row in every context. Used by `trade-deletion-orchestrator` and by the
-   * trade-uuid rotation path.
+   * fact row in every context, plus the daily-MTM series. Used by
+   * `trade-deletion-orchestrator` and by the trade-uuid rotation path.
    *
    * Returns `{deleted, asOfDatesTouched}`. The caller is expected to chain a
    * cascade-delete of the AS_OF_*_GAINS rows for the touched dates via
-   * `GainSnapshotsTrustedApi.deleteAsOfRowsForDates(asOfDatesTouched)` (as-of-
-   * gain-reconstitution PRD E11 / D14). Splitting the cross-package call to
-   * the caller keeps trade-yield-persistence's config.json minimal and avoids
-   * coupling this package to gain-snapshots at the dependency level.
+   * `GainSnapshotsTrustedApi.deleteAsOfRowsForDates(asOfDatesTouched)`.
    *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
-   * - `dynamodb:GetItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.as-of-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.since-trade-yield-summaries/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.since-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-daily-mtm-series` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-daily-mtm-series` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on AS_OF_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:BatchWriteItem on OPEN_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:BatchWriteItem on SINCE_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:BatchWriteItem on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:BatchWriteItem on TRADE_DAILY_MTM_SERIES
-   * @iam dynamodb:BatchWriteItem on TRADE_YIELD_SEGMENTS
-   * @iam dynamodb:GetItem on OPEN_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on AS_OF_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on SINCE_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_DAILY_MTM_SERIES
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
+   * NOTE: although the yield tables FK trades(trade_id) ON DELETE CASCADE, this
+   * method deletes explicitly (the domain calls it for invalidation without
+   * deleting the trade row) and returns the same counts/shape as the DDB version.
+   * Segment portion + archetype-contribution children cascade via their own FKs.
    */
   async deleteByTrade(tradeUuid: TradeUUID): Promise<{deleted: number; asOfDatesTouched: Datestamp[]}> {
     const log = this.#log.setMethod('deleteByTrade');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     const _t = Date.now();
     try {
-      const [segmentRows, unitRows, openRow, asOfRows, sinceRows, dailyMTMRows] = await Promise.all([
-        this.#queryAllSegmentsForTrade(tradeUuid),
-        this.#queryAllUnitsForTrade(tradeUuid),
-        this.#dynamo.get<_OpenTradeYieldSummary>(OPEN_TRADE_YIELD_SUMMARIES, {owner, tradeUuid}),
-        this.getAsOfTradeSummaryRowsForTrade(tradeUuid),
-        this.getSinceTradeSummaryRowsForTrade(tradeUuid),
-        this.queryDailyMTMSeriesForTrade(tradeUuid),
-      ]);
-      let total = 0;
+      // Collect the as-of dates touched before deleting (for the caller's gain cascade).
+      const asOfDateRows = await this.#db.selectFrom('as_of_trade_yield_summaries')
+        .select(sql<string>`as_of_date::text`.as('as_of_date'))
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .execute();
+      const asOfDatesTouched = [...new Set(asOfDateRows.map(r => r.as_of_date as Datestamp))];
 
-      if (segmentRows.length > 0) {
-        const keys = segmentRows.map(r => ({owner: r.owner, contextTradeStartSk: r.contextTradeStartSk}));
-        const count = keys.length;
-        await this.#dynamo.batchDelete({[TRADE_YIELD_SEGMENTS]: keys});
-        total += count;
-      }
-      if (unitRows.length > 0) {
-        const keys = unitRows.map(r => ({owner: r.owner, contextTradeSubTradeUnitSk: r.contextTradeSubTradeUnitSk}));
-        const count = keys.length;
-        await this.#dynamo.batchDelete({[SUB_TRADE_YIELD_UNITS]: keys});
-        total += count;
-      }
-      if (openRow) {
-        await this.#dynamo.batchDelete({[OPEN_TRADE_YIELD_SUMMARIES]: [{owner, tradeUuid}]});
-        total += 1;
-      }
-      // Collected for cascade-delete by the caller (as-of-gain-reconstitution PRD E11/D14).
-      const asOfDatesTouched = [...new Set(asOfRows.map(r => r.asOfDate))];
-      if (asOfRows.length > 0) {
-        const keys = asOfRows.map(r => ({owner: r.owner, asOfDateTradeUuidSk: r.asOfDateTradeUuidSk}));
-        const count = keys.length;
-        await this.#dynamo.batchDelete({[AS_OF_TRADE_YIELD_SUMMARIES]: keys});
-        total += count;
-      }
-      if (sinceRows.length > 0) {
-        const keys = sinceRows.map(r => ({owner: r.owner, sinceAnchorTradeUuidSk: r.sinceAnchorTradeUuidSk}));
-        const count = keys.length;
-        await this.#dynamo.batchDelete({[SINCE_TRADE_YIELD_SUMMARIES]: keys});
-        total += count;
-      }
-      if (dailyMTMRows.length > 0) {
-        const keys = dailyMTMRows.map(r => ({owner: r.owner, tradeDateSk: r.tradeDateSk}));
-        const count = keys.length;
-        await this.#dynamo.batchDelete({[TRADE_DAILY_MTM_SERIES]: keys});
-        total += count;
-      }
+      let total = 0;
+      // Segments (their transaction-portion children cascade via FK).
+      const segDel = await this.#db.deleteFrom('trade_yield_segments')
+        .where('owner', '=', owner).where('trade_id', '=', tradeUuid).executeTakeFirst();
+      total += Number(segDel.numDeletedRows ?? 0n);
+      const unitDel = await this.#db.deleteFrom('sub_trade_yield_units')
+        .where('owner', '=', owner).where('trade_id', '=', tradeUuid).executeTakeFirst();
+      total += Number(unitDel.numDeletedRows ?? 0n);
+      const openDel = await this.#db.deleteFrom('open_trade_yield_summaries')
+        .where('owner', '=', owner).where('trade_id', '=', tradeUuid).executeTakeFirst();
+      total += Number(openDel.numDeletedRows ?? 0n);
+      const asOfDel = await this.#db.deleteFrom('as_of_trade_yield_summaries')
+        .where('owner', '=', owner).where('trade_id', '=', tradeUuid).executeTakeFirst();
+      total += Number(asOfDel.numDeletedRows ?? 0n);
+      const sinceDel = await this.#db.deleteFrom('since_trade_yield_summaries')
+        .where('owner', '=', owner).where('trade_id', '=', tradeUuid).executeTakeFirst();
+      total += Number(sinceDel.numDeletedRows ?? 0n);
+      // Daily-MTM series (archetype-contribution children cascade via FK).
+      const mtmDel = await this.#db.deleteFrom('trade_daily_mtm_series')
+        .where('owner', '=', owner).where('trade_id', '=', tradeUuid).executeTakeFirst();
+      total += Number(mtmDel.numDeletedRows ?? 0n);
+
       log.timing(`[trace:trade-yield-persistence] deleteByTrade: ${Date.now() - _t}ms | tradeUuid=${tradeUuid} total=${total} asOfDatesTouched=${asOfDatesTouched.length}`);
       return {deleted: total, asOfDatesTouched};
     } catch (err) {
@@ -977,39 +1030,20 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Delete fact rows (segments + units) for one (trade, context). Used by the
-   * summary write path to replace the prior context's facts atomically. Does
-   * NOT touch summary rows.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:BatchWriteItem on TRADE_YIELD_SEGMENTS
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
+   * summary write path to replace the prior context's facts. Does NOT touch
+   * summary rows. Segment transaction-portion children cascade via FK.
    */
   async deleteFactRowsByTradeAndContext(tradeUuid: TradeUUID, context: YieldContext): Promise<number> {
     const log = this.#log.setMethod('deleteFactRowsByTradeAndContext');
+    const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const [segments, units] = await Promise.all([
-        this.getSegmentRowsForTradeAndContext(tradeUuid, context),
-        this.getSubTradeYieldUnitRowsForTradeAndContext(tradeUuid, context),
-      ]);
       let total = 0;
-      if (segments.length > 0) {
-        const keys = segments.map(r => ({owner: r.owner, contextTradeStartSk: r.contextTradeStartSk}));
-        const count = keys.length;
-        await this.#dynamo.batchDelete({[TRADE_YIELD_SEGMENTS]: keys});
-        total += count;
-      }
-      if (units.length > 0) {
-        const keys = units.map(r => ({owner: r.owner, contextTradeSubTradeUnitSk: r.contextTradeSubTradeUnitSk}));
-        const count = keys.length;
-        await this.#dynamo.batchDelete({[SUB_TRADE_YIELD_UNITS]: keys});
-        total += count;
-      }
+      const segDel = await this.#db.deleteFrom('trade_yield_segments')
+        .where('owner', '=', owner).where('trade_id', '=', tradeUuid).where('context', '=', context).executeTakeFirst();
+      total += Number(segDel.numDeletedRows ?? 0n);
+      const unitDel = await this.#db.deleteFrom('sub_trade_yield_units')
+        .where('owner', '=', owner).where('trade_id', '=', tradeUuid).where('context', '=', context).executeTakeFirst();
+      total += Number(unitDel.numDeletedRows ?? 0n);
       log.info(`deleteFactRowsByTradeAndContext: tradeUuid=${tradeUuid} context=${context} total=${total}`);
       return total;
     } catch (err) {
@@ -1019,32 +1053,15 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   /**
    * Delete the open-context fact rows + summary row for one trade.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
-   * - `dynamodb:GetItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.open-trade-yield-summaries` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on OPEN_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:BatchWriteItem on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:BatchWriteItem on TRADE_YIELD_SEGMENTS
-   * @iam dynamodb:GetItem on OPEN_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
    */
   async deleteOpenTradeRowsByTrade(tradeUuid: TradeUUID): Promise<number> {
     const log = this.#log.setMethod('deleteOpenTradeRowsByTrade');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
       const factCount = await this.deleteFactRowsByTradeAndContext(tradeUuid, OPEN_CONTEXT);
-      const openRow = await this.#dynamo.get<_OpenTradeYieldSummary>(OPEN_TRADE_YIELD_SUMMARIES, {owner, tradeUuid});
-      let summaryCount = 0;
-      if (openRow) {
-        await this.#dynamo.batchDelete({[OPEN_TRADE_YIELD_SUMMARIES]: [{owner, tradeUuid}]});
-        summaryCount = 1;
-      }
+      const openDel = await this.#db.deleteFrom('open_trade_yield_summaries')
+        .where('owner', '=', owner).where('trade_id', '=', tradeUuid).executeTakeFirst();
+      const summaryCount = Number(openDel.numDeletedRows ?? 0n);
       log.info(`deleteOpenTradeRowsByTrade: tradeUuid=${tradeUuid} facts=${factCount} summary=${summaryCount}`);
       return factCount + summaryCount;
     } catch (err) {
@@ -1056,20 +1073,6 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Historical-yield-invalidation cleanup: delete every as-of summary row for one
    * trade where `asOfDate >= fromDate`, plus the matching fact rows for each.
    * Idempotent.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.as-of-trade-yield-summaries/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.as-of-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on AS_OF_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:BatchWriteItem on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:BatchWriteItem on TRADE_YIELD_SEGMENTS
-   * @iam dynamodb:Query on AS_OF_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
    */
   async deleteAsOfSummariesByTradeAndDateRange(tradeUuid: TradeUUID, fromDate: Datestamp): Promise<number> {
     const log = this.#log.setMethod('deleteAsOfSummariesByTradeAndDateRange');
@@ -1080,9 +1083,13 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       for (const row of rows) {
         factCount += await this.deleteFactRowsByTradeAndContext(tradeUuid, asOfContext(row.asOfDate));
       }
-      const keys = rows.map(r => ({owner: r.owner, asOfDateTradeUuidSk: r.asOfDateTradeUuidSk}));
-      const summaryCount = keys.length;
-      await this.#dynamo.batchDelete({[AS_OF_TRADE_YIELD_SUMMARIES]: keys});
+      const owner = getSessionOwner(this.ec) as AccountOwner;
+      const del = await this.#db.deleteFrom('as_of_trade_yield_summaries')
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .where('as_of_date', '>=', fromDate as unknown as Date)
+        .executeTakeFirst();
+      const summaryCount = Number(del.numDeletedRows ?? 0n);
       log.info(`deleteAsOfSummariesByTradeAndDateRange: tradeUuid=${tradeUuid} fromDate=${fromDate} summaries=${summaryCount} facts=${factCount}`);
       return summaryCount + factCount;
     } catch (err) {
@@ -1094,20 +1101,6 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * Historical-yield-invalidation cleanup: delete every since summary row for one
    * trade where `sinceAnchorEpoch >= fromEpoch`, plus the matching fact rows.
    * Idempotent.
-   *
-   * **IAM (transitive):**
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.since-trade-yield-summaries/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.since-trade-yield-summaries` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.trade-yield-segments/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.trade-yield-segments` (+ test mirror)
-   * - `dynamodb:Query` on `financials.trade-yield-persistence.sub-trade-yield-units/index/byTrade-index` (+ test mirror)
-   * - `dynamodb:BatchWriteItem` on `financials.trade-yield-persistence.sub-trade-yield-units` (+ test mirror)
-   * @iam dynamodb:BatchWriteItem on SINCE_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:BatchWriteItem on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:BatchWriteItem on TRADE_YIELD_SEGMENTS
-   * @iam dynamodb:Query on SINCE_TRADE_YIELD_SUMMARIES
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
    */
   async deleteSinceSummariesByTradeAndAnchorRange(tradeUuid: TradeUUID, fromEpoch: number): Promise<number> {
     const log = this.#log.setMethod('deleteSinceSummariesByTradeAndAnchorRange');
@@ -1119,9 +1112,13 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       for (const row of affected) {
         factCount += await this.deleteFactRowsByTradeAndContext(tradeUuid, sinceContext(row.sinceAnchorEpoch));
       }
-      const keys = affected.map(r => ({owner: r.owner, sinceAnchorTradeUuidSk: r.sinceAnchorTradeUuidSk}));
-      const summaryCount = keys.length;
-      await this.#dynamo.batchDelete({[SINCE_TRADE_YIELD_SUMMARIES]: keys});
+      const owner = getSessionOwner(this.ec) as AccountOwner;
+      const del = await this.#db.deleteFrom('since_trade_yield_summaries')
+        .where('owner', '=', owner)
+        .where('trade_id', '=', tradeUuid)
+        .where('since_anchor_epoch', '>=', fromEpoch as unknown as string)
+        .executeTakeFirst();
+      const summaryCount = Number(del.numDeletedRows ?? 0n);
       log.info(`deleteSinceSummariesByTradeAndAnchorRange: tradeUuid=${tradeUuid} fromEpoch=${fromEpoch} summaries=${summaryCount} facts=${factCount}`);
       return summaryCount + factCount;
     } catch (err) {
@@ -1131,87 +1128,57 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   // ── Internals ───────────────────────────────────────────────────────────────
 
-  /**
-   * @iam dynamodb:Query on TRADE_YIELD_SEGMENTS
-   */
-  
-  async #queryAllSegmentsForTrade(tradeUuid: TradeUUID): Promise<_TradeYieldSegment[]> {
-    const owner = getSessionOwner(this.ec) as AccountOwner;
-    const keyExpr: KeyStructuredExpression = {
-      partitionFieldName: 'owner',
-      operator: '=',
-      value: owner,
-      sortFieldName: 'tradeContextStartSk',
-      sortOperator: 'begins_with',
-      sortValue: `${tradeUuid}#`,
-    };
-    return await this.#dynamo.query<_TradeYieldSegment>(TRADE_YIELD_SEGMENTS, BY_TRADE_INDEX, keyExpr);
+  async #openSummaryRow(owner: AccountOwner, tradeUuid: TradeUUID): Promise<_OpenTradeYieldSummary | undefined> {
+    const row = await this.#db.selectFrom('open_trade_yield_summaries')
+      .selectAll()
+      .select(sql<string | null>`closing_date::text`.as('closing_date'))
+      .where('owner', '=', owner)
+      .where('trade_id', '=', tradeUuid)
+      .executeTakeFirst();
+    if (!row) return undefined;
+    return this.#openSummaryRowToRecord(row as OpenSummaryRow);
   }
 
-  /**
-   * @iam dynamodb:Query on SUB_TRADE_YIELD_UNITS
-   */
-  
-  async #queryAllUnitsForTrade(tradeUuid: TradeUUID): Promise<_SubTradeYieldUnit[]> {
-    const owner = getSessionOwner(this.ec) as AccountOwner;
-    const keyExpr: KeyStructuredExpression = {
-      partitionFieldName: 'owner',
-      operator: '=',
-      value: owner,
-      sortFieldName: 'tradeContextSubTradeUnitSk',
-      sortOperator: 'begins_with',
-      sortValue: `${tradeUuid}#`,
+  #openSummaryRowToRecord(row: OpenSummaryRow): _OpenTradeYieldSummary {
+    const record: _OpenTradeYieldSummary = {
+      owner: row.owner as AccountOwner,
+      tradeUuid: row.trade_id as TradeUUID,
+      peakSimultaneousCaR: Number(row.peak_simultaneous_car),
+      startEpoch: Number(row.start_epoch),
+      endEpoch: row.end_epoch === null ? null : Number(row.end_epoch),
+      days: row.days,
+      totalGain: Number(row.total_gain),
+      realizedGain: Number(row.realized_gain),
+      unrealizedGain: Number(row.unrealized_gain),
+      passiveGain: Number(row.passive_gain),
+      feesAndCommissions: Number(row.fees_and_commissions),
+      yield: Number(row.yield),
+      annualizedYieldLinear: Number(row.annualized_yield_linear),
+      annualizedYieldCagr: Number(row.annualized_yield_cagr),
+      subTradeWins: row.sub_trade_wins,
+      subTradeLosses: row.sub_trade_losses,
+      subTradeBreakevens: row.sub_trade_breakevens,
+      subTradeWinRate: row.sub_trade_win_rate === null ? null : Number(row.sub_trade_win_rate),
+      subTradeWinAmount: Number(row.sub_trade_win_amount),
+      subTradeLossAmount: Number(row.sub_trade_loss_amount),
+      computedAt: Number(row.computed_at),
     };
-    return await this.#dynamo.query<_SubTradeYieldUnit>(SUB_TRADE_YIELD_UNITS, BY_TRADE_INDEX, keyExpr);
+    if (row.price_source !== null) record.priceSource = row.price_source as 'realtime' | 'most-recent-close';
+    if (row.closing_date !== null) record.closingDate = row.closing_date as Datestamp;
+    if (row.explanation !== null) record.explanation = row.explanation;
+    if (row.price_coverage !== null) record.priceCoverage = Number(row.price_coverage);
+    if (row.recompute_attempts !== null) record.recomputeAttempts = row.recompute_attempts;
+    if (row.started_by !== null) record.startedBy = row.started_by;
+    if (row.job_id !== null) record.jobId = row.job_id;
+    if (row.writer !== null) record.writerLambda = row.writer;
+    if (row.writer_version !== null) record.writerVersion = row.writer_version;
+    if (row.written_at !== null) record.writtenAt = Number(row.written_at);
+    return record;
   }
 }
 
-/**
- * Build an LSI Query keyed by `owner` with an optional date-range bound, where the LSI
- * SK is structured as `${prefix}#${asOfDate}`. Prefix is typically a TradeUUID.
- */
-function buildLsiQueryByPrefixWithRange(
-  owner: AccountOwner,
-  sortFieldName: string,
-  prefix: string,
-  range?: DateRange,
-): KeyStructuredExpression {
-  const partitionPart: KeyStructuredExpression = {
-    partitionFieldName: 'owner',
-    operator: '=',
-    value: owner,
-  };
-  if (range?.from && range?.to) {
-    return {
-      ...partitionPart,
-      sortFieldName,
-      sortOperator: 'between',
-      sortValue: [`${prefix}#${range.from}`, `${prefix}#${range.to}#~`],
-    };
-  }
-  if (range?.from) {
-    return {
-      ...partitionPart,
-      sortFieldName,
-      sortOperator: 'between',
-      sortValue: [`${prefix}#${range.from}`, `${prefix}#~`],
-    };
-  }
-  if (range?.to) {
-    return {
-      ...partitionPart,
-      sortFieldName,
-      sortOperator: 'between',
-      sortValue: [`${prefix}#`, `${prefix}#${range.to}#~`],
-    };
-  }
-  return {
-    ...partitionPart,
-    sortFieldName,
-    sortOperator: 'begins_with',
-    sortValue: `${prefix}#`,
-  };
-}
+/** Open-summary SELECT row with `closing_date` projected to a 'YYYY-MM-DD' string via `::text`. */
+type OpenSummaryRow = Omit<Selectable<OpenTradeYieldSummariesTable>, 'closing_date'> & {closing_date: string | null};
 
 // Re-exports for consumer convenience.
 export {

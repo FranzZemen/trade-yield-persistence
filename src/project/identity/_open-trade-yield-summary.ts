@@ -7,24 +7,24 @@ import {Provenance} from '@franzzemen/admin-identity';
 import {DBRecord} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {
-  SubTradeYieldUnitUUID,
   TradeUUID,
   TradeYieldSegment,
   TradeYieldSegmentSummary,
-  TradeYieldSegmentUUID,
   SubTradeYieldUnit,
 } from '@franzzemen/financial-identity';
 import {Datestamp} from '@franzzemen/utility';
+import type {Selectable} from 'kysely';
+import type {OpenTradeYieldSummariesTable} from '@franzzemen/brokenstock-postgres-ddl/schema-types';
 
 /**
- * Persisted shape of the rolling open-trade yield summary. One row per (owner, tradeUuid).
+ * In-memory shape of the rolling open-trade yield summary. One row per (owner, tradeUuid).
  *
- * Stored fields are the scalars of the public `TradeYieldSegmentSummary` PLUS
- * `segmentUuids[]` / `subTradeYieldUnitUuids[]` reference arrays back into the
- * fact tables. The public `segments[]` and `subTradeYieldUnits[]` arrays are
- * NOT persisted on the summary row — they're hydrated by the trusted API on
- * read by Query-ing the fact tables. This keeps summary rows compact and
- * avoids segment/summary drift on partial writes.
+ * Stored fields are the scalars of the public `TradeYieldSegmentSummary`. The
+ * `segments[]` / `subTradeYieldUnits[]` arrays are NOT on the summary row —
+ * they're hydrated by the trusted API on read from the segments + units tables
+ * (`WHERE (owner, trade_id, context='open')`). In Postgres (Era 4 / 4a) the DDB
+ * `segmentUuids[]` / `subTradeYieldUnitUuids[]` reference arrays are DROPPED
+ * (era-4-4a-yield-persistence-ddl.prd.md 4a-4b).
  */
 export type _OpenTradeYieldSummary = DBRecord & {
   owner: AccountOwner;
@@ -52,9 +52,6 @@ export type _OpenTradeYieldSummary = DBRecord & {
   subTradeWinRate: number | null;
   subTradeWinAmount: number;
   subTradeLossAmount: number;
-
-  segmentUuids: TradeYieldSegmentUUID[];
-  subTradeYieldUnitUuids: SubTradeYieldUnitUUID[];
 
   priceSource?: 'realtime' | 'most-recent-close';
   closingDate?: Datestamp;
