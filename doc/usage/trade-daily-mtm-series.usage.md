@@ -37,9 +37,10 @@ keyed `(owner, trade_id, date_epoch, archetype)` and FK'd to the parent
 
 ## Producer
 
-`lambda-trade-daily-mtm-populator` (sam-brokenstock-batch). Triggered by a
-`TradeDailyMTMPopulatePayload` on `TRADE_DAILY_MTM_POPULATE_QUEUE` (see
-`@franzzemen/async-jobs`):
+The daily-MTM populator runs as a job on the in-VPC `yields` systemd worker,
+driven by the pg-chunked-jobs queue (`job` / `job_chunk` on the pg-queue;
+nightly fan-out is scheduled by `pg_cron` on `prod_blue`). A populate job carries
+a `TradeDailyMTMPopulatePayload`:
 
 ```typescript
 type TradeDailyMTMPopulatePayload = {
@@ -61,9 +62,9 @@ for closed/complete trades).
 
 | Site | Trigger | Mode |
 |---|---|---|
-| `trade-yield-aggregate-handler` (sam-brokenstock) | First chart view of a trade with no rows yet | `'full'` |
-| Nightly orchestrator | Per active trade with existing rows | `'tail-extend'` |
-| Historical-yield-invalidation publisher | Yield-math change wipes affected trades | `'full'` (re-fires after wipe) |
+| `trade-yield-aggregate` route (app worker) | First chart view of a trade with no rows yet | `'full'` |
+| Nightly `pg_cron` job | Per active trade with existing rows | `'tail-extend'` |
+| Historical-yield-invalidation enqueuer | Yield-math change wipes affected trades | `'full'` (re-fires after wipe) |
 
 ## Consumer
 

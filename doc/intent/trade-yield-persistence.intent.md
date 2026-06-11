@@ -27,8 +27,8 @@ generated `Database` kysely types and constructs
 - **The DDL / schema.** Tables, indexes, and constraints live in `@franzzemen/brokenstock-postgres-ddl`. This package consumes the generated `Database` interface; it never issues DDL and has no schema files of its own.
 - **Yield math.** That lives in `@franzzemen/yield` (`decomposeTradeGains`, `evaluateTradeYieldSegments`, `aggregateTradeYieldSummary`).
 - **Public types.** Wire shapes (`TradeYieldSegment`, `TradeYieldSegmentSummary`, `Archetype`, `SegmentBoundaryKind`, `SubTradeYieldUnit`) live in `@franzzemen/financial-identity`; this package only persists them.
-- **REST surface.** `sam-brokenstock`'s `lambda-trades` handlers call this package through `@franzzemen/brokenstock-orchestrator`.
-- **Vendor pricing.** All vendor calls go through `@franzzemen/financial-data` from worker lambdas.
+- **REST surface.** The in-VPC `app` worker's trade routes (behind the API Gateway → VPC Link → internal ALB edge) call this package through `@franzzemen/brokenstock-orchestrator`.
+- **Vendor pricing.** All vendor calls go through `@franzzemen/financial-data` from the in-VPC workers.
 
 ## Design invariants
 
