@@ -1,6 +1,6 @@
 {
   "name": "@franzzemen/trade-yield-persistence",
-  "version": "2.0.15",
+  "version": "2.0.16",
   "description": "Persistence layer for trade-level yield segments (TradeYieldSegment, SubTradeYieldUnit, open/as-of/since trade-yield summaries, daily-MTM series). kysely/Postgres-backed trusted I/O APIs consumed by brokenstock-orchestrator.",
   "homepage": "https://github.com/FranzZemen/trade-yield-persistence#readme",
   "bugs": {
