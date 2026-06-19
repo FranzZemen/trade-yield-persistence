@@ -94,14 +94,14 @@ read. Apply the same:
 
 | Epic | Title | Status |
 |------|-------|--------|
-| E1 | DDL: add `lineage_graph jsonb` + amend ZERO-jsonb commentary | Not Started |
-| E2 | Persistence: persist + rehydrate `lineageGraph` (single-read hydrates, batch projects out) | Not Started |
-| E3 | Tests: put→get round-trip guard + batch-excludes-lineage | Not Started |
-| E4 | app-worker: honor `?force=true` on `/aggregate` (recompute live + persist) | Not Started |
-| E5 | Backfill: recompute+persist option-bearing open summaries (prod_blue) | Not Started |
-| E6 | Publish + deploy chain (DDL migrate + lib publish + worker deploys, both DBs) | Not Started |
-| E7 | End-to-end verification (APLD lineage renders; round-trip confirmed) | Not Started |
-| E8 | Update repo docs + global PRD index | Not Started |
+| E1 | DDL: add `lineage_graph jsonb` + amend ZERO-jsonb commentary | ✅ Completed (ddl 0.13.26; dev_franz column verified) |
+| E2 | Persistence: persist + rehydrate `lineageGraph` (single-read hydrates, batch projects out) | ✅ Completed (trade-yield-persistence 2.1.0) |
+| E3 | Tests: put→get round-trip guard + batch-excludes-lineage | ✅ Completed (D7 + D6 tests; 15 passing on dev_franz) |
+| E4 | app-worker: honor `?force=true` on `/aggregate` (recompute live + persist) | ✅ Completed (app-worker 0.0.75) |
+| E5 | Backfill: recompute+persist option-bearing open summaries (prod_blue) | ✅ Completed 2026-06-19 (371 recompute jobs enqueued via yields-worker; see e5-lineage-backfill.mjs) |
+| E6 | Publish + deploy chain (DDL migrate + lib publish + worker deploys, both DBs) | ✅ Completed (persistence 2.1.0, orchestrator 20.12.50, app-worker 0.0.75 + yields-worker 0.0.37 → dev_franz + prod_blue) |
+| E7 | End-to-end verification (APLD lineage renders; round-trip confirmed) | ✅ Completed 2026-06-19 (FE Managed Rolls tab renders; backend round-trip via E3) |
+| E8 | Update repo docs + global PRD index | ✅ Completed (PRD index + status table; route/migration comments; README polish optional) |
 
 ---
 

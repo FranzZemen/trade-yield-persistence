@@ -71,7 +71,8 @@ call throws `OrphanTradeError` and persists nothing — catch it with
 ## Summary reads
 
 ```typescript
-const open    = await api.getOpenTradeSummary(tradeUuid);                     // TradeYieldSegmentSummary | undefined
+const open    = await api.getOpenTradeSummary(tradeUuid);                     // TradeYieldSegmentSummary | undefined (no lineage)
+const openFull= await api.getOpenTradeSummary(tradeUuid, {includeLineage: true}); // hydrates summary.lineageGraph (managed rolls)
 const asOf    = await api.getAsOfTradeSummary(tradeUuid, '2026-04-15');       // AsOfTradeYieldSegmentSummary | undefined
 const since   = await api.getSinceTradeSummary(tradeUuid, anchorEpoch);
 const allOpen = await api.getAllOpenTradeSummaryRows();                       // every open-trade summary row for owner (no hydration)
@@ -84,6 +85,23 @@ const dailyByDate = await api.getAsOfTradeSummaryRowsForOwnerAndDate('2026-04-15
 The composite reads (`getOpenTradeSummary` / `getAsOfTradeSummary` /
 `getSinceTradeSummary`) hydrate the summary row + its segments + units into the
 public DTO. The `…RowsFor…` reads return summary scalar rows only.
+
+### Managed-roll lineage (`lineage_graph`)
+
+`putOpenTradeSummary` persists `summary.lineageGraph` (the managed-roll split/merge/roll
+DAG, present only for option-bearing trades) to the `open_trade_yield_summaries.lineage_graph`
+**jsonb** column. This is the one deliberate exception to era-4-4a's ZERO-jsonb rule:
+the graph is **render-only** — the FE Managed Rolls tab reads it whole; nothing runs SQL
+over its internals (gains/portions stay relational), so it never needs to be queryable.
+
+Hydration is **opt-in** to keep list/batch reads lean (D6):
+
+- `getOpenTradeSummary(uuid, {includeLineage: true})` — selects + hydrates `lineageGraph`.
+  The orchestrator's single-trade read (`getStoredTradeYield`) passes this.
+- `getOpenTradeSummary(uuid)` (default) — does **not** select the column, so the batch
+  path (`getStoredBatchTradeYields`) never detoasts lineage for the trade list.
+
+Equity-only trades have no `lineageGraph` (round-trips as `undefined`).
 
 ## Admin / provenance helpers
 
