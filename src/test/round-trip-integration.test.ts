@@ -45,6 +45,11 @@ import {
   SinceTradeYieldSegmentSummary,
   TransactionUUID,
   TradeUUID,
+  TradeLineageGraph,
+  LineageInferredEvent,
+  LineageInferredLeaf,
+  LineageGraphFamily,
+  LineageGraphSegment,
 } from '@franzzemen/financial-identity';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {Datestamp} from '@franzzemen/utility';
@@ -259,6 +264,77 @@ function makeDailyMtm(tradeUuid: TradeUUID): _TradeDailyMTMSeries {
   };
 }
 
+/**
+ * A non-trivial managed-roll lineage graph (a rolled short call): one leaf with a
+ * roll event carrying per-node yield, plus a two-segment family with a split, merge
+ * and transition. Exercises the nested jsonb round-trip (D7 regression canary for
+ * the silent-drop bug). Uses the seeded txn uuids so the shape is realistic.
+ */
+function makeLineageGraph(): TradeLineageGraph {
+  const day = '2026-04-21' as Datestamp;
+  const ev: LineageInferredEvent = {
+    kind: 'roll',
+    day,
+    epoch: 1_700_086_400_000,
+    contracts: 2,
+    closedSymbol: 'AAPL 2026-04-17 C190',
+    openedSymbol: 'AAPL 2026-05-15 C195',
+    closedStrike: 190,
+    openedStrike: 195,
+    closedExpiry: '2026-04-17' as Datestamp,
+    openedExpiry: '2026-05-15' as Datestamp,
+    closedTransactionUuids: [txnUuid1],
+    openedTransactionUuids: [txnUuid2],
+    ambiguous: false,
+    pairingRule: 'exact-qty',
+    explanation: 'rolled the covered call up-and-out',
+    yield: {
+      realizedDollar: 120, realizedPercent: 1.5,
+      runningRealizedDollar: 120, runningRealizedPercent: 1.5,
+      mtmDollar: 30, mtmPercent: 0.4, totalDollar: 150, totalPercent: 1.9,
+    },
+  };
+  const leaf: LineageInferredLeaf = {
+    seriesId: 'AAPL-C-roll-1',
+    underlying: 'AAPL',
+    optionType: 'Call',
+    direction: 'Short',
+    rollCount: 1,
+    events: [ev],
+    termination: {kind: 'open', epoch: 1_700_086_400_000, strike: 195},
+    startEpoch: 1_700_000_000_000,
+    startDay: '2026-04-01' as Datestamp,
+    openContracts: 2,
+    currentSymbol: 'AAPL 2026-05-15 C195',
+    currentStrike: 195,
+    currentExpiry: '2026-05-15' as Datestamp,
+    contributingShares: [
+      {transactionUuid: txnUuid1, contracts: 2},
+      {transactionUuid: txnUuid2, contracts: 2},
+    ],
+    ambiguous: false,
+  };
+  const seg1: LineageGraphSegment = {id: 'seg-1', leafIds: ['AAPL-C-roll-1'], events: [ev], terminalForLeafIds: []};
+  const seg2: LineageGraphSegment = {id: 'seg-2', leafIds: ['AAPL-C-roll-1'], events: [], terminalForLeafIds: ['AAPL-C-roll-1']};
+  const family: LineageGraphFamily = {
+    segments: [seg1, seg2],
+    splits: [{fromSegmentId: 'seg-1', toSegmentIds: ['seg-2'], day, epoch: 1_700_086_400_000, sharedTransactionUuid: txnUuid2}],
+    merges: [{
+      id: 'merge-1', fromSegmentIds: ['seg-1'], toSegmentId: 'seg-2', day,
+      openedSymbol: 'AAPL 2026-05-15 C195', totalContracts: 2,
+      sourceEventsByLeaf: {'AAPL-C-roll-1': ev}, ambiguous: false,
+    }],
+    transitions: [{fromSegmentId: 'seg-1', toSegmentId: 'seg-2'}],
+  };
+  return {
+    leaves: [leaf],
+    asOfEpoch: 1_700_100_000_000,
+    totalOptionTransactions: 4,
+    discardedSingletonLeaves: 0,
+    lineageGraphs: [family],
+  };
+}
+
 // Sort segments by uuid so deep-equal is order-independent.
 const byUuid = <T extends {uuid?: string}>(a: T, b: T) => (a.uuid! < b.uuid! ? -1 : 1);
 
@@ -324,6 +400,34 @@ suite('trade-yield-persistence round-trip integration (PG / dev_franz)', functio
     // sorted, hydrated arrays so the deep-equal is order-independent).
     const expected = {...summary, segments: [...read!.segments], subTradeYieldUnits: [...read!.subTradeYieldUnits]};
     expect(read).to.deep.equal(expected);
+  });
+
+  it('lineage (D7): includeLineage:true round-trips lineage_graph byte-for-byte (silent-drop canary)', async () => {
+    const lineageGraph = makeLineageGraph();
+    const summary = {
+      ...makeOpenSummary(tradeUuid1, [makeSegment(tradeUuid1, 1_700_000_000_000, null, 1000, 50)], [makeUnit(tradeUuid1)]),
+      lineageGraph,
+    };
+    await api.putOpenTradeSummary(summary, testProvenance);
+
+    const read = await api.getOpenTradeSummary(tradeUuid1, {includeLineage: true});
+    expect(read, 'summary should exist').to.exist;
+    expect(read!.lineageGraph, 'lineageGraph must hydrate when includeLineage:true').to.exist;
+    // Deep-equal the full graph — the regression guard for the managed-rolls silent-drop bug.
+    expect(read!.lineageGraph).to.deep.equal(lineageGraph);
+  });
+
+  it('lineage (D6): default read does NOT hydrate lineage_graph (batch/list path stays lean)', async () => {
+    const summary = {
+      ...makeOpenSummary(tradeUuid1, [makeSegment(tradeUuid1, 1_700_000_000_000, null, 1000, 50)], []),
+      lineageGraph: makeLineageGraph(),
+    };
+    await api.putOpenTradeSummary(summary, testProvenance);
+
+    // Default (no opts) → includeLineage:false → the column is not selected/hydrated.
+    const read = await api.getOpenTradeSummary(tradeUuid1);
+    expect(read, 'summary should exist').to.exist;
+    expect(read!.lineageGraph, 'lineageGraph must be absent on the default (batch) read path').to.be.undefined;
   });
 
   it('open: a second put replaces prior fact rows (no accumulation)', async () => {

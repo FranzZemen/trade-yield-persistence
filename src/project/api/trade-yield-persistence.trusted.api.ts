@@ -12,6 +12,7 @@ import {
   AsOfTradeYieldSegmentSummary,
   SinceTradeYieldSegmentSummary,
   SubTradeYieldUnit,
+  TradeLineageGraph,
   TradeUUID,
   TradeYieldSegment,
   TradeYieldSegmentSummary,
@@ -373,6 +374,10 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
         writer: provenance.writerLambda,
         writer_version: provenance.writerVersion,
         written_at: provenance.writtenAt as unknown as string,
+        // Managed-roll lineage (render-only jsonb). Stringify so the value lands as
+        // valid jsonb (text→jsonb cast) — same idiom as brokenstock-alerts. NULL for
+        // equity-only trades. See restore-managed-roll-lineage-persistence.prd.md.
+        lineage_graph: (summary.lineageGraph != null ? JSON.stringify(summary.lineageGraph) : null) as any,
         created_by: owner,
         updated_by: owner,
       })
@@ -406,6 +411,7 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
           writer: eb.ref('excluded.writer'),
           writer_version: eb.ref('excluded.writer_version'),
           written_at: eb.ref('excluded.written_at'),
+          lineage_graph: eb.ref('excluded.lineage_graph'),
           updated_by: eb.ref('excluded.updated_by'),
         })))
         .execute();
@@ -427,11 +433,14 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
    * to the public `TradeYieldSegmentSummary` wire shape. Returns undefined when
    * no summary row exists.
    */
-  async getOpenTradeSummary(tradeUuid: TradeUUID): Promise<TradeYieldSegmentSummary | undefined> {
+  async getOpenTradeSummary(
+    tradeUuid: TradeUUID,
+    opts?: {includeLineage?: boolean},
+  ): Promise<TradeYieldSegmentSummary | undefined> {
     const log = this.#log.setMethod('getOpenTradeSummary');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
-      const row = await this.#openSummaryRow(owner, tradeUuid);
+      const row = await this.#openSummaryRow(owner, tradeUuid, opts?.includeLineage ?? false);
       if (!row) return undefined;
       const [segments, units] = await Promise.all([
         this.getSegmentRowsForTradeAndContext(tradeUuid, OPEN_CONTEXT).then(rs => rs.map(toTradeYieldSegment)),
@@ -1128,13 +1137,23 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
 
   // ── Internals ───────────────────────────────────────────────────────────────
 
-  async #openSummaryRow(owner: AccountOwner, tradeUuid: TradeUUID): Promise<_OpenTradeYieldSummary | undefined> {
-    const row = await this.#db.selectFrom('open_trade_yield_summaries')
-      .selectAll()
-      .select(sql<string | null>`closing_date::text`.as('closing_date'))
+  async #openSummaryRow(
+    owner: AccountOwner,
+    tradeUuid: TradeUUID,
+    includeLineage: boolean,
+  ): Promise<_OpenTradeYieldSummary | undefined> {
+    // D6: the `lineage_graph` jsonb is selected ONLY for single-trade reads
+    // (managed-rolls renderer). The list/batch path passes includeLineage=false so
+    // Postgres never detoasts lineage for every trade in a portfolio. closing_date is
+    // projected to a 'YYYY-MM-DD' string via ::text (date-only, no TZ roll).
+    const base = this.#db.selectFrom('open_trade_yield_summaries')
       .where('owner', '=', owner)
       .where('trade_id', '=', tradeUuid)
-      .executeTakeFirst();
+      .select(OPEN_SUMMARY_LEAN_COLUMNS)
+      .select(sql<string | null>`closing_date::text`.as('closing_date'));
+    const row = includeLineage
+      ? await base.select('lineage_graph').executeTakeFirst()
+      : await base.executeTakeFirst();
     if (!row) return undefined;
     return this.#openSummaryRowToRecord(row as OpenSummaryRow);
   }
@@ -1173,12 +1192,34 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
     if (row.writer !== null) record.writerLambda = row.writer;
     if (row.writer_version !== null) record.writerVersion = row.writer_version;
     if (row.written_at !== null) record.writtenAt = Number(row.written_at);
+    // lineage_graph is present only on single-trade reads (includeLineage). pg returns
+    // jsonb already parsed; absent on lean/batch reads (column not selected → undefined).
+    if (row.lineage_graph != null) record.lineageGraph = row.lineage_graph as TradeLineageGraph;
     return record;
   }
 }
 
-/** Open-summary SELECT row with `closing_date` projected to a 'YYYY-MM-DD' string via `::text`. */
-type OpenSummaryRow = Omit<Selectable<OpenTradeYieldSummariesTable>, 'closing_date'> & {closing_date: string | null};
+/**
+ * Scalar columns of `open_trade_yield_summaries` for the lean read — everything EXCEPT
+ * `closing_date` (projected via `::text`) and `lineage_graph` (appended only when
+ * includeLineage). Keep in sync with `#openSummaryRowToRecord` (co-located edits).
+ */
+const OPEN_SUMMARY_LEAN_COLUMNS = [
+  'owner', 'trade_id', 'peak_simultaneous_car', 'start_epoch', 'end_epoch', 'days',
+  'total_gain', 'realized_gain', 'unrealized_gain', 'passive_gain', 'fees_and_commissions',
+  'yield', 'annualized_yield_linear', 'annualized_yield_cagr',
+  'sub_trade_wins', 'sub_trade_losses', 'sub_trade_breakevens', 'sub_trade_win_rate',
+  'sub_trade_win_amount', 'sub_trade_loss_amount', 'price_source', 'computed_at',
+  'explanation', 'price_coverage', 'recompute_attempts', 'started_by', 'job_id',
+  'writer', 'writer_version', 'written_at', 'created_at', 'updated_at', 'created_by', 'updated_by',
+] as const satisfies ReadonlyArray<keyof OpenTradeYieldSummariesTable>;
+
+/**
+ * Open-summary SELECT row with `closing_date` projected to a 'YYYY-MM-DD' string via `::text`.
+ * `lineage_graph` is optional — present only on single-trade reads (includeLineage).
+ */
+type OpenSummaryRow = Omit<Selectable<OpenTradeYieldSummariesTable>, 'closing_date' | 'lineage_graph'>
+  & {closing_date: string | null; lineage_graph?: unknown | null};
 
 // Re-exports for consumer convenience.
 export {
