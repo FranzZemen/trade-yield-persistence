@@ -8,6 +8,11 @@
     "declarationDir": "../../out/test/types",
     "outDir": "../../out/test"
   },
+  "references": [
+    {
+      "path": "../project/tsconfig.json"
+    }
+  ],
   "include": [
     "**/*"
   ]

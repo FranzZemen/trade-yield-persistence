@@ -35,13 +35,13 @@
   },
   "exports": {
     ".": {
-      "types": "./out/project/types/index.d.js",
+      "types": "./out/project/types/index.d.ts",
       "import": "./out/project/index.js"
     }
   },
   "imports": {
     "#project": {
-      "types": "./out/project/types/project-index.d.js",
+      "types": "./out/project/types/project-index.d.ts",
       "import": "./out/project/project-index.js"
     }
   },
