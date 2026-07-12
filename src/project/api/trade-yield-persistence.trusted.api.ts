@@ -4,7 +4,7 @@ License Type: UNLICENSED
 */
 
 import {Provenance} from '@franzzemen/admin-identity';
-import {EndpointApplicationsApi, getSessionOwner} from '@franzzemen/endpoint-application';
+import {assertOwnerUuid, EndpointApplicationsApi, getSessionOwner} from '@franzzemen/endpoint-application';
 import {AccountOwner} from '@franzzemen/endpoint-financial-identity';
 import {logAndEnhanceError} from '@franzzemen/enhanced-error';
 import {ExecutionContext} from '@franzzemen/execution-context';
@@ -107,6 +107,26 @@ export class OrphanTradeError extends Error {
 
 export function isOrphanTradeError(err: unknown): err is OrphanTradeError {
   return err instanceof Error && err.name === 'OrphanTradeError';
+}
+
+/**
+ * Rows deleted by {@link TradeYieldPersistenceTrustedApi.deleteByOwner}, per table.
+ *
+ * A concrete interface rather than `Record<string, number>` so the purge orchestrator's audit
+ * record cannot silently lose a table to a typo, and so this package's purge surface is
+ * self-documenting: these are exactly the owner-keyed tables it owns.
+ *
+ * `trade_yield_segment_transaction_portions` is absent by design — it has no `owner` column and
+ * cascades off `trade_yield_segments`, so it has no count of its own.
+ */
+export interface TradeYieldPersistencePurgeCounts {
+  trade_daily_mtm_archetype_contributions: number;
+  trade_daily_mtm_series: number;
+  trade_yield_segments: number;
+  sub_trade_yield_units: number;
+  open_trade_yield_summaries: number;
+  as_of_trade_yield_summaries: number;
+  since_trade_yield_summaries: number;
 }
 
 export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
@@ -1132,6 +1152,74 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       return summaryCount + factCount;
     } catch (err) {
       throw logAndEnhanceError(log, err as Error);
+    }
+  }
+
+  // ── User-purge hook ─────────────────────────────────────────────────────────
+
+  /**
+   * PURGE HOOK — delete EVERY row this package owns for `ownerUuid`, for admin user deletion
+   * (users/doc/prd/user-deletion.prd.md, E4).
+   *
+   * Deliberately NOT session-scoped: the owner is an explicit argument, unlike the rest of this
+   * class. The purge runs in brokenstock-admin-app-worker on behalf of an admin erasing SOMEONE
+   * ELSE's data, so there is no session owner to read — which is why this lives on the trusted API
+   * and is never reachable from a user-facing route.
+   *
+   * This is a RESIDUE SWEEP, not the bulk delete. All seven tables FK `trades(trade_id)`
+   * ON DELETE CASCADE, so when the orchestrator deletes the user's trades nearly all of this dies
+   * automatically. The explicit DELETEs here catch any row that outlives its trade, and — more
+   * importantly — are the backstop that keeps the purge correct if a future migration ever drops
+   * one of those CASCADE clauses.
+   *
+   * Tables owned, in FK-safe order (children before parents, among THESE tables):
+   *   1. trade_daily_mtm_archetype_contributions — FKs trade_daily_mtm_series(owner, trade_id, date_epoch)
+   *   2. trade_daily_mtm_series
+   *   3. trade_yield_segments — its `trade_yield_segment_transaction_portions` children have no
+   *      `owner` column and cascade off the segment, so they need no explicit delete
+   *   4. sub_trade_yield_units
+   *   5. open_trade_yield_summaries
+   *   6. as_of_trade_yield_summaries
+   *   7. since_trade_yield_summaries
+   * (4–7 are FK-independent siblings; only 1-before-2 and segments-before-portions are forced.)
+   *
+   * Idempotent: a second call deletes 0 rows and returns zero counts — that is what makes the
+   * pg-queue retry of a partially-completed purge safe.
+   *
+   * @returns rows deleted per table, for the audit-chain erasure record.
+   */
+  async deleteByOwner(ownerUuid: string): Promise<TradeYieldPersistencePurgeCounts> {
+    const log = this.#log.setMethod('deleteByOwner');
+    try {
+      assertOwnerUuid(ownerUuid);
+      const contribs = await this.#db.deleteFrom('trade_daily_mtm_archetype_contributions')
+        .where('owner', '=', ownerUuid).executeTakeFirst();
+      const mtm = await this.#db.deleteFrom('trade_daily_mtm_series')
+        .where('owner', '=', ownerUuid).executeTakeFirst();
+      const segments = await this.#db.deleteFrom('trade_yield_segments')
+        .where('owner', '=', ownerUuid).executeTakeFirst();
+      const units = await this.#db.deleteFrom('sub_trade_yield_units')
+        .where('owner', '=', ownerUuid).executeTakeFirst();
+      const open = await this.#db.deleteFrom('open_trade_yield_summaries')
+        .where('owner', '=', ownerUuid).executeTakeFirst();
+      const asOf = await this.#db.deleteFrom('as_of_trade_yield_summaries')
+        .where('owner', '=', ownerUuid).executeTakeFirst();
+      const since = await this.#db.deleteFrom('since_trade_yield_summaries')
+        .where('owner', '=', ownerUuid).executeTakeFirst();
+
+      const counts: TradeYieldPersistencePurgeCounts = {
+        trade_daily_mtm_archetype_contributions: Number(contribs.numDeletedRows ?? 0n),
+        trade_daily_mtm_series:                  Number(mtm.numDeletedRows ?? 0n),
+        trade_yield_segments:                    Number(segments.numDeletedRows ?? 0n),
+        sub_trade_yield_units:                   Number(units.numDeletedRows ?? 0n),
+        open_trade_yield_summaries:              Number(open.numDeletedRows ?? 0n),
+        as_of_trade_yield_summaries:             Number(asOf.numDeletedRows ?? 0n),
+        since_trade_yield_summaries:             Number(since.numDeletedRows ?? 0n),
+      };
+      log.info(`deleteByOwner: ${JSON.stringify(counts)}`);
+      return counts;
+    } catch (error) {
+      throw logAndEnhanceError(log, error as Error, 'Error purging trade-yield persistence by owner');
     }
   }
 

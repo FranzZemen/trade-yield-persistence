@@ -92,9 +92,9 @@ const tradeUuid2 = getTradeUUID();
 const txnUuid1 = getTransactionUUID();
 const txnUuid2 = getTransactionUUID();
 
-function setSession(): void {
+function setSession(sessionOwner: AccountOwner = owner): void {
   ec.putSub<EndpointContext, Session>(endpointContextKey, 'iam.session', {
-    appContext: 'endpoint-application', startEpoch: Date.now(), owner,
+    appContext: 'endpoint-application', startEpoch: Date.now(), owner: sessionOwner,
     token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ0ZXN0In0.signature',
     createdBy: owner, updatedBy: owner, createdEpoch: Date.now(), updatedEpoch: Date.now(),
     authenticated: true, previouslyAuthenticated: false, invalidated: false,
@@ -644,5 +644,139 @@ suite('trade-yield-persistence round-trip integration (PG / dev_franz)', functio
     expect(sinceContext(1).localeCompare(sinceContext(2))).to.be.lessThan(0);
     expect(sinceContext(999).localeCompare(sinceContext(1000))).to.be.lessThan(0);
     expect(sinceContext(1_700_000_000_000).localeCompare(sinceContext(1_800_000_000_000))).to.be.lessThan(0);
+  });
+
+  /**
+   * E4 user-purge hook. These tests deliberately seed yield rows and then purge WITHOUT deleting
+   * the parent trade — otherwise the trades FK CASCADE would do the work and we would be testing
+   * the DDL, not the sweep. The sweep is the backstop for rows that outlive their trade (and for a
+   * future migration that drops a CASCADE), so it has to be proven on its own.
+   */
+  describe('deleteByOwner (user-purge hook)', () => {
+    const bystanderOwner: AccountOwner = `${randomUUID()}.user` as AccountOwner;
+    const bystanderAccountId = getBrokerageAccountUUID();
+    const bystanderTradeUuid = getTradeUUID();
+
+    /** The seven owner-keyed tables this package purges. */
+    const PURGED_TABLES = [
+      'trade_daily_mtm_archetype_contributions',
+      'trade_daily_mtm_series',
+      'trade_yield_segments',
+      'sub_trade_yield_units',
+      'open_trade_yield_summaries',
+      'as_of_trade_yield_summaries',
+      'since_trade_yield_summaries',
+    ] as const;
+
+    async function countRows(table: typeof PURGED_TABLES[number], forOwner: AccountOwner): Promise<number> {
+      const row = await db.selectFrom(table)
+        .select(db.fn.countAll<string>().as('c'))
+        .where('owner', '=', forOwner)
+        .executeTakeFirstOrThrow();
+      return Number(row.c);
+    }
+
+    /**
+     * Write one row into each of the seven tables for `rowOwner`'s `tradeUuid`, re-pointing the
+     * shared ec's session first (the put* methods derive the owner from it).
+     * `withPortions:false` skips segment transaction-portions — they FK `transactions`, which are
+     * seeded only for the victim owner.
+     */
+    async function seedYieldRows(rowOwner: AccountOwner, tradeUuid: TradeUUID, withPortions: boolean): Promise<void> {
+      setSession(rowOwner);
+      const seg = (): TradeYieldSegment => {
+        const s = makeSegment(tradeUuid, 1_700_000_000_000, null, 1000, 50);
+        return withPortions ? s : {...s, transactionPortions: []};
+      };
+      await api.putOpenTradeSummary(makeOpenSummary(tradeUuid, [seg()], [makeUnit(tradeUuid)]), testProvenance);
+      await api.putAsOfTradeSummary({
+        ...makeOpenSummary(tradeUuid, [seg()], []),
+        asOfDate: '2026-04-21' as Datestamp, asOfEpoch: 1_700_086_400_000, priceCoverage: 1.0,
+      }, testProvenance);
+      await api.putSinceTradeSummary({
+        ...makeOpenSummary(tradeUuid, [seg()], []),
+        sinceAnchorEpoch: 1_700_000_000_000, gainSince: 50,
+      }, testProvenance);
+      await api.putDailyMTMRows([{...makeDailyMtm(tradeUuid), owner: rowOwner}], testProvenance);
+      setSession(owner);
+    }
+
+    before(async () => {
+      await db.insertInto('brokerage_accounts').values({
+        account_id: bystanderAccountId, owner: bystanderOwner, brokerage: 'Fidelity' as never,
+        account: '987654321', nickname: null, created_by: bystanderOwner, updated_by: bystanderOwner,
+      }).execute();
+      await db.insertInto('trades').values({
+        trade_id: bystanderTradeUuid, owner: bystanderOwner, account_id: bystanderAccountId,
+        brokerage: 'Fidelity' as never, account: '987654321',
+        symbol_partition: 'Fidelity:987654321:AAPL', symbol: 'AAPL', security_key: 'XNAS:AAPL',
+        status: 'Open', opened_epoch: String(1_700_000_000_000), closed_epoch: String(Number.MAX_SAFE_INTEGER),
+        open_positions: '100', created_by: bystanderOwner, updated_by: bystanderOwner,
+      }).execute();
+    });
+
+    // Re-point the shared ec back at the victim: seedYieldRows moves the session, and the outer
+    // afterEach's deleteByTrade() is session-scoped.
+    afterEach(() => setSession(owner));
+
+    after(async () => {
+      await db.deleteFrom('trades').where('owner', '=', bystanderOwner).execute();
+      await db.deleteFrom('brokerage_accounts').where('owner', '=', bystanderOwner).execute();
+    });
+
+    it('deletes every row for the owner and reports the count', async () => {
+      await seedYieldRows(owner, tradeUuid1, true);
+      const segmentIds = (await db.selectFrom('trade_yield_segments').select('segment_id')
+        .where('owner', '=', owner).execute()).map(r => r.segment_id);
+      expect(segmentIds.length, 'segments should be seeded').to.be.greaterThan(0);
+
+      const counts = await api.deleteByOwner(owner);
+
+      for (const table of PURGED_TABLES) {
+        expect(counts[table], `${table} count must be reported`).to.be.greaterThan(0);
+        expect(await countRows(table, owner), `${table} must be empty after purge`).to.equal(0);
+      }
+      // The portion children have no owner column — they cascade off the deleted segments.
+      const portions = await db.selectFrom('trade_yield_segment_transaction_portions')
+        .select(db.fn.countAll<string>().as('c'))
+        .where('segment_id', 'in', segmentIds)
+        .executeTakeFirstOrThrow();
+      expect(Number(portions.c), 'segment transaction-portions must cascade away').to.equal(0);
+
+      // The parent trade is untouched — this proves the explicit sweep did the work, not the FK cascade.
+      const trade = await db.selectFrom('trades').select('trade_id')
+        .where('trade_id', '=', tradeUuid1).executeTakeFirst();
+      expect(trade, 'the parent trade must still exist (sweep, not cascade)').to.exist;
+    });
+
+    it('is idempotent', async () => {
+      await seedYieldRows(owner, tradeUuid1, true);
+      await api.deleteByOwner(owner);
+      const second = await api.deleteByOwner(owner);
+      for (const table of PURGED_TABLES) {
+        expect(second[table], `${table} must be 0 on the second call`).to.equal(0);
+      }
+    });
+
+    it('touches only the target owner', async () => {
+      await seedYieldRows(owner, tradeUuid1, true);
+
+      await seedYieldRows(bystanderOwner, bystanderTradeUuid, false);
+
+      await api.deleteByOwner(owner);
+
+      for (const table of PURGED_TABLES) {
+        expect(await countRows(table, owner), `${table} must be empty for the purged owner`).to.equal(0);
+        expect(await countRows(table, bystanderOwner), `${table} must survive for the bystander`).to.be.greaterThan(0);
+      }
+    });
+
+    it('refuses a malformed owner', async () => {
+      for (const bad of ['', 'not-a-uuid', `${randomUUID()}`, undefined as unknown as string]) {
+        let thrown: unknown;
+        try { await api.deleteByOwner(bad); } catch (err) { thrown = err; }
+        expect(thrown, `deleteByOwner(${JSON.stringify(bad)}) must throw`).to.exist;
+      }
+    });
   });
 });
