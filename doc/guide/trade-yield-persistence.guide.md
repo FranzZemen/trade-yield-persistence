@@ -133,6 +133,15 @@ This package depends on `financial-identity`, `endpoint-financial-identity`,
 `@franzzemen/brokenstock-postgres-ddl`. The `Kysely<Database>` instance is
 supplied by the caller at construction — this package does not own the connection.
 
+## User purge (`deleteByOwner`)
+
+`TradeYieldPersistenceTrustedApi.deleteByOwner(ownerUuid)` is the trusted purge hook the
+brokenstock-admin-app-worker orchestrator calls when an admin deletes a user. These tables mostly die by FK
+cascade from `trades`, so this is a **residue sweep** — as-of / rollup rows that outlive their trade — and a
+backstop if a migration ever drops an `ON DELETE CASCADE`; it returns per-table counts (normally zeros). The
+owner-keyed table registry lives in `@franzzemen/users` (`src/project/purge/purge-registry.ts`), and its
+completeness scan **fails the build** if a new owner-keyed table isn't registered.
+
 ## Cross-references
 
 - Usage (consumer-facing): `doc/usage/trade-yield-persistence.usage.md`.
