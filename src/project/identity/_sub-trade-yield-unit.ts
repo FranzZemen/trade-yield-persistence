@@ -50,7 +50,12 @@ export function unitRowToRecord(row: UnitRow): _SubTradeYieldUnit {
     endEpoch: row.end_epoch === null ? null : Number(row.end_epoch),
     gain: Number(row.gain),
     days: row.days,
-    yield: Number(row.yield),
+    // MUST guard the null: `Number(null) === 0`, so a plain Number() silently
+    // round-trips a NULL yield back to 0 — turning "capital-less, undefined"
+    // into "broke even" and making the whole nullable-yield change a no-op that
+    // still looks correct. Same idiom as end_epoch two lines above.
+    // (sub-trade-yield-scoping.prd.md E26.)
+    yield: row.yield === null ? null : Number(row.yield),
     feesAndCommissions: Number(row.fees_and_commissions),
   };
   if (row.mtm_price_at_boundary !== null) unit.markToMarketPriceAtBoundary = Number(row.mtm_price_at_boundary);
