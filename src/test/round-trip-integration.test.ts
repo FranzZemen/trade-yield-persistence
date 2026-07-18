@@ -23,7 +23,7 @@ import {expect} from 'chai';
 import {randomUUID} from 'node:crypto';
 import {Provenance} from '@franzzemen/admin-identity';
 import {ExecutionContext} from '@franzzemen/execution-context';
-import {endpointContextKey, EndpointContext, Session, systemAdministratorRoles} from '@franzzemen/endpoint-application';
+import {endpointContextKey, EndpointContext, Session} from '@franzzemen/endpoint-application';
 import {awsContextKey, type AWSContext} from '@franzzemen/aws-app/context';
 import {loadPostgresConfig} from '@franzzemen/postgres-app/config-loader';
 import {createPool} from '@franzzemen/postgres-app/pool';
@@ -99,7 +99,7 @@ function setSession(sessionOwner: AccountOwner = owner): void {
     createdBy: owner, updatedBy: owner, createdEpoch: Date.now(), updatedEpoch: Date.now(),
     authenticated: true, previouslyAuthenticated: false, invalidated: false,
     ttl: Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60,
-    start: '2026-06-08T00:00:00Z', roles: systemAdministratorRoles,
+    start: '2026-06-08T00:00:00Z',
   } as Session);
 }
 
