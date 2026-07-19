@@ -58,6 +58,10 @@ export function unitRowToRecord(row: UnitRow): _SubTradeYieldUnit {
     yield: row.yield === null ? null : Number(row.yield),
     feesAndCommissions: Number(row.fees_and_commissions),
   };
+  // E10b — NULL means the sub-trade earned no income (or predates the column).
+  // Guarded explicitly even though Number(null)===0 is the right answer here, so
+  // this reads the same way as the `yield` guard above, where 0 would be a lie.
+  if (row.income_gain !== null && row.income_gain !== undefined) unit.incomeGain = Number(row.income_gain);
   if (row.mtm_price_at_boundary !== null) unit.markToMarketPriceAtBoundary = Number(row.mtm_price_at_boundary);
   if (row.explanation !== null) unit.explanation = row.explanation;
 

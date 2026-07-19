@@ -18,7 +18,7 @@
   },
   "devDependencies": {
     "@franzzemen/aws-app": "^29.2.18",
-    "@franzzemen/brokenstock-postgres-ddl": "^0.41.7",
+    "@franzzemen/brokenstock-postgres-ddl": "^0.41.8",
     "@franzzemen/build-system": "^36.1.0",
     "@franzzemen/execution-context-node-loader": "^2.0.47",
     "@franzzemen/node-loggers": "^1.0.126",
@@ -51,7 +51,7 @@
     "@franzzemen/endpoint-financial-identity": "^7.2.58",
     "@franzzemen/enhanced-error": "^8.1.225",
     "@franzzemen/execution-context": "^16.2.12",
-    "@franzzemen/financial-identity": "^66.1.0",
+    "@franzzemen/financial-identity": "^66.2.0",
     "@franzzemen/logger": "^104.0.60",
     "@franzzemen/utility": "^14.0.1",
     "kysely": "^0.29.4"

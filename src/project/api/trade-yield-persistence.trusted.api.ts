@@ -237,6 +237,9 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
           days: u.days,
           yield: u.yield as unknown as string,
           fees_and_commissions: u.feesAndCommissions as unknown as string,
+          // E10b — absent means "no income"; store NULL rather than 0 so the
+          // column distinguishes "not computed" from "computed as zero".
+          income_gain: (u.incomeGain ?? null) as unknown as string | null,
           explanation: u.explanation ?? null,
           started_by: provenance.startedBy,
           job_id: provenance.jobId,
