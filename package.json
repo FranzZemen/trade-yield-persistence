@@ -17,17 +17,17 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "devDependencies": {
-    "@franzzemen/aws-app": "^29.2.20",
-    "@franzzemen/brokenstock-postgres-ddl": "^0.41.10",
+    "@franzzemen/aws-app": "^29.2.21",
+    "@franzzemen/brokenstock-postgres-ddl": "^0.42.1",
     "@franzzemen/build-system": "^36.1.0",
-    "@franzzemen/execution-context-node-loader": "^2.0.48",
-    "@franzzemen/node-loggers": "^1.0.128",
-    "@franzzemen/npmu": "^12.5.41",
-    "@franzzemen/postgres-app": "^1.1.53",
-    "@franzzemen/safe-config": "^5.1.45",
+    "@franzzemen/execution-context-node-loader": "^2.0.49",
+    "@franzzemen/node-loggers": "^1.0.129",
+    "@franzzemen/npmu": "^12.5.42",
+    "@franzzemen/postgres-app": "^1.1.54",
+    "@franzzemen/safe-config": "^5.1.46",
     "@types/chai": "^5.2.3",
     "@types/mocha": "^10.0.10",
-    "@types/node": "^26.1.1",
+    "@types/node": "^26.1.2",
     "chai": "^6.2.2",
     "fastest-validator": "^1.19.1",
     "mocha": "^11.7.6",
@@ -46,14 +46,14 @@
     }
   },
   "dependencies": {
-    "@franzzemen/admin-identity": "^0.0.27",
-    "@franzzemen/endpoint-application": "^13.8.11",
-    "@franzzemen/endpoint-financial-identity": "^7.2.63",
-    "@franzzemen/enhanced-error": "^8.1.227",
-    "@franzzemen/execution-context": "^16.3.1",
-    "@franzzemen/financial-identity": "^66.2.3",
-    "@franzzemen/logger": "^104.0.62",
-    "@franzzemen/utility": "^14.0.1",
+    "@franzzemen/admin-identity": "^0.0.28",
+    "@franzzemen/endpoint-application": "^13.8.12",
+    "@franzzemen/endpoint-financial-identity": "^7.2.64",
+    "@franzzemen/enhanced-error": "^8.1.228",
+    "@franzzemen/execution-context": "^16.3.2",
+    "@franzzemen/financial-identity": "^66.7.1",
+    "@franzzemen/logger": "^104.0.63",
+    "@franzzemen/utility": "^14.0.2",
     "kysely": "^0.29.4"
   }
 }
