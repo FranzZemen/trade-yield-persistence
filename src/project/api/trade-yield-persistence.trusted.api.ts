@@ -105,6 +105,46 @@ export class OrphanTradeError extends Error {
   }
 }
 
+/**
+ * Thrown when a caller tries to persist a summary computed at REAL-TIME prices.
+ *
+ * Live marks are a read-time overlay and are never stored
+ * (realtime-open-position-pricing.prd.md D1). Storing one does three things,
+ * all bad and none loud:
+ *
+ *  - Two page loads a minute apart disagree, with no way to tell which is right.
+ *  - The nightly rollup aggregates a mid-session mark as though it were a
+ *    settled close, and that figure becomes stored history.
+ *  - An entitled user's live number becomes the answer served to an unentitled
+ *    user, who is not paying for it and cannot tell.
+ *
+ * The guard lives HERE, at the single write, rather than as a rule each caller
+ * remembers — three separate paths had already drifted into persisting live
+ * prices, one of them just by omitting an argument. A convention that has
+ * already failed three times is not a convention.
+ */
+export class RealtimePricePersistError extends Error {
+  readonly tradeUuid: string;
+  readonly persistOp: 'open' | 'as-of';
+  constructor(tradeUuid: string, persistOp: 'open' | 'as-of') {
+    super(
+      `Refusing to persist ${persistOp} summary for trade ${tradeUuid}: it was computed at realtime prices. `
+      + `Live marks are a read-time overlay and must never be stored — recompute with priceSource 'most-recent-close' `
+      + `to persist, and apply the live overlay on the read path instead.`
+    );
+    this.name = 'RealtimePricePersistError';
+    this.tradeUuid = tradeUuid;
+    this.persistOp = persistOp;
+  }
+}
+
+export function isRealtimePricePersistError(err: unknown): err is RealtimePricePersistError {
+  // Name-based, exactly like isOrphanTradeError: `instanceof` does not survive
+  // the error-enhancing wrapper (or a duplicated copy of this module), and a
+  // guard that silently stops matching is worse than no guard.
+  return err instanceof Error && err.name === 'RealtimePricePersistError';
+}
+
 export function isOrphanTradeError(err: unknown): err is OrphanTradeError {
   return err instanceof Error && err.name === 'OrphanTradeError';
 }
@@ -354,6 +394,12 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
     const log = this.#log.setMethod('putOpenTradeSummary');
     const owner = getSessionOwner(this.ec) as AccountOwner;
     try {
+      // D1 — never store a live mark. Checked before the delete below, so a
+      // refused write leaves the existing stored rows intact rather than
+      // clearing them and then failing.
+      if (summary.priceSource === 'realtime') {
+        throw new RealtimePricePersistError(summary.tradeUuid, 'open');
+      }
       if (opts?.existsCheck) {
         const exists = await opts.existsCheck();
         if (!exists) throw new OrphanTradeError(summary.tradeUuid, 'open');
@@ -447,6 +493,9 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       // (name 'Error'), defeating the guard. Mirrors the PauseRetryError
       // pass-through convention.
       if (isOrphanTradeError(err)) throw err;
+      // Same reasoning: the D1 refusal is a control-flow signal the caller must
+      // be able to identify, so it must reach them unwrapped.
+      if (isRealtimePricePersistError(err)) throw err;
       throw logAndEnhanceError(log, err as Error);
     }
   }
@@ -562,6 +611,12 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
     const owner = getSessionOwner(this.ec) as AccountOwner;
     const context = asOfContext(summary.asOfDate);
     try {
+      // D1 — never store a live mark. Checked before the delete below, so a
+      // refused write leaves the existing stored rows intact rather than
+      // clearing them and then failing.
+      if (summary.priceSource === 'realtime') {
+        throw new RealtimePricePersistError(summary.tradeUuid, 'as-of');
+      }
       if (opts?.existsCheck) {
         const exists = await opts.existsCheck();
         if (!exists) throw new OrphanTradeError(summary.tradeUuid, 'as-of');
@@ -647,6 +702,9 @@ export class TradeYieldPersistenceTrustedApi extends EndpointApplicationsApi {
       log.info(`putAsOfTradeSummary: tradeUuid=${summary.tradeUuid} asOfDate=${summary.asOfDate} segments=${segmentRows.length} units=${unitRows.length} startedBy=${provenance.startedBy}`);
     } catch (err) {
       if (isOrphanTradeError(err)) throw err;
+      // Same reasoning: the D1 refusal is a control-flow signal the caller must
+      // be able to identify, so it must reach them unwrapped.
+      if (isRealtimePricePersistError(err)) throw err;
       throw logAndEnhanceError(log, err as Error);
     }
   }

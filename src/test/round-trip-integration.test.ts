@@ -62,6 +62,7 @@ import {
   TradeYieldPersistenceTrustedApi,
   asOfContext,
   isOrphanTradeError,
+  isRealtimePricePersistError,
   OPEN_CONTEXT,
   sinceContext,
 } from '#project';
@@ -240,7 +241,10 @@ function makeOpenSummary(tradeUuid: TradeUUID, segments: TradeYieldSegment[], un
     subTradeWinRate:    0.5,
     subTradeWinAmount:  120,
     subTradeLossAmount: 30,
-    priceSource: 'realtime',
+    // most-recent-close, deliberately: putOpenTradeSummary REFUSES a realtime
+    // summary (D1), so this fixture would fail every round-trip if it kept the
+    // live source it originally carried.
+    priceSource: 'most-recent-close',
     closingDate: '2026-04-21' as Datestamp,
     explanation: 'rolling open-trade summary',
     computedAt: 1_700_100_000_000,
@@ -614,6 +618,51 @@ suite('trade-yield-persistence round-trip integration (PG / dev_franz)', functio
     const rows = await api.getAllOpenTradeSummaryRows();
     const ours = rows.filter(r => r.tradeUuid === tradeUuid1 || r.tradeUuid === tradeUuid2);
     expect(ours.length).to.equal(2);
+  });
+
+  it('realtime guard: putOpenTradeSummary refuses a summary computed at live prices', async () => {
+    const summary = {
+      ...makeOpenSummary(tradeUuid1, [makeSegment(tradeUuid1, 1_700_000_000_000, null, 500, 25)], []),
+      priceSource: 'realtime' as const,
+    };
+    let thrown: unknown;
+    try {
+      await api.putOpenTradeSummary(summary, testProvenance);
+    } catch (err) { thrown = err; }
+    expect(thrown, 'putOpenTradeSummary should throw').to.exist;
+    expect(isRealtimePricePersistError(thrown), 'must be detectable as RealtimePricePersistError').to.be.true;
+  });
+
+  it('realtime guard: putAsOfTradeSummary refuses one too', async () => {
+    const asOfDate = '2026-04-21' as Datestamp;
+    const asOfSummary: AsOfTradeYieldSegmentSummary = {
+      ...makeOpenSummary(tradeUuid1, [makeSegment(tradeUuid1, 1_700_000_000_000, null, 500, 25)], []),
+      asOfDate, asOfEpoch: new Date(`${asOfDate}T20:00:00Z`).getTime(), priceCoverage: 1.0,
+      priceSource: 'realtime',
+    };
+    let thrown: unknown;
+    try {
+      await api.putAsOfTradeSummary(asOfSummary, testProvenance);
+    } catch (err) { thrown = err; }
+    expect(isRealtimePricePersistError(thrown), 'must be detectable as RealtimePricePersistError').to.be.true;
+  });
+
+  // The refusal must not be destructive. putOpenTradeSummary deletes the trade's
+  // existing rows before writing, so a guard placed after that delete would
+  // clear good stored data and then fail — leaving the trade with nothing.
+  it('realtime guard: a refused write leaves the previously stored rows intact', async () => {
+    const good = makeOpenSummary(tradeUuid1, [makeSegment(tradeUuid1, 1_700_000_000_000, null, 1000, 50)], [makeUnit(tradeUuid1)]);
+    await api.putOpenTradeSummary(good, testProvenance);
+    const before = await api.getOpenTradeSummary(tradeUuid1);
+    expect(before, 'stored summary should exist before the refused write').to.exist;
+
+    try {
+      await api.putOpenTradeSummary({...good, priceSource: 'realtime' as const, totalGain: 999999}, testProvenance);
+    } catch { /* expected */ }
+
+    const after = await api.getOpenTradeSummary(tradeUuid1);
+    expect(after, 'stored summary must survive the refused write').to.exist;
+    expect(after!.totalGain).to.equal(before!.totalGain);
   });
 
   it('orphan guard: putOpenTradeSummary throws a detectable OrphanTradeError when existsCheck is false', async () => {
