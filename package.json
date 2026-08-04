@@ -17,13 +17,13 @@
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "devDependencies": {
-    "@franzzemen/aws-app": "^29.2.26",
+    "@franzzemen/aws-app": "^29.2.27",
     "@franzzemen/brokenstock-postgres-ddl": "^0.46.4",
     "@franzzemen/build-system": "^36.1.0",
     "@franzzemen/execution-context-node-loader": "^2.0.50",
     "@franzzemen/node-loggers": "^1.0.133",
     "@franzzemen/npmu": "^12.5.44",
-    "@franzzemen/postgres-app": "^1.1.59",
+    "@franzzemen/postgres-app": "^1.1.60",
     "@franzzemen/safe-config": "^5.1.47",
     "@types/chai": "^5.2.3",
     "@types/mocha": "^10.0.10",
@@ -47,8 +47,8 @@
   },
   "dependencies": {
     "@franzzemen/admin-identity": "^0.0.29",
-    "@franzzemen/endpoint-application": "^13.8.18",
-    "@franzzemen/endpoint-financial-identity": "^7.2.70",
+    "@franzzemen/endpoint-application": "^13.8.19",
+    "@franzzemen/endpoint-financial-identity": "^7.2.71",
     "@franzzemen/enhanced-error": "^8.1.232",
     "@franzzemen/execution-context": "^16.3.3",
     "@franzzemen/financial-identity": "^67.2.5",
